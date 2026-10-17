@@ -1,0 +1,53 @@
+name: jira-inbox
+
+# Open an issue in this repo with your own tasks, one per line:
+#   Finish DB lab report | 2h | fri
+#   Call the bank about the card | 10m | today
+#   done PER-42
+# They land in your Jira inbox, then this workflow replies and closes the issue.
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: jira-autopilot
+  cancel-in-progress: false
+
+jobs:
+  add:
+    # Only your own issues count. Anyone else's are ignored, which matters on a public repo.
+    if: github.event.issue.user.login == github.repository_owner
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add tasks to Jira
+        env:
+          JIRA_SITE: ${{ secrets.JIRA_SITE }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_TOKEN: ${{ secrets.JIRA_TOKEN }}
+          JIRA_PROJECT: ${{ vars.JIRA_PROJECT || secrets.JIRA_PROJECT }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          INBOX_RESULT: ${{ runner.temp }}/inbox.md
+        run: python3 autopilot.py inbox
+      - name: Reply and close
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT: ${{ runner.temp }}/inbox.md
+          NUMBER: ${{ github.event.issue.number }}
+        run: gh issue close "$NUMBER" --repo "$GITHUB_REPOSITORY" --comment "$(cat "$RESULT")"
+      - name: Reply on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NUMBER: ${{ github.event.issue.number }}
+        run: gh issue comment "$NUMBER" --repo "$GITHUB_REPOSITORY" --body "Could not add these. Open the jira-inbox run in the Actions tab to see why."

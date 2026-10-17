@@ -16,6 +16,7 @@ Commands:
                                 (the very first tick runs the kickoff: a few tasks and a starter sprint)
   python autopilot.py kickoff   run that first-run setup now
   python autopilot.py urgent    something comes up: add an urgent task and start it now
+  python autopilot.py inbox     add your own tasks from ISSUE_TITLE / ISSUE_BODY (the issue workflow)
   python autopilot.py drop | morning | night | sprint    force one phase now
   python autopilot.py refill    ask your LLM (optional) for fresh task ideas
 Add --dry-run to any command to see what would happen without changing Jira.
@@ -384,11 +385,28 @@ class Pool:
         return out
 
 
-def llm_tasks(personal, recent_titles, n=25):
+def llm_array(prompt, temperature):
+    """One chat call to any OpenAI-compatible API. Returns the JSON array in the reply, or None."""
     base, key, model = (os.environ.get("LLM_BASE_URL"), os.environ.get("LLM_API_KEY"),
                         os.environ.get("LLM_MODEL"))
     if not (base and key and model):
-        return []
+        return None
+    body = json.dumps({"model": model, "messages": [{"role": "user", "content": prompt}],
+                       "temperature": temperature}).encode()
+    request = urllib.request.Request(base.rstrip("/") + "/chat/completions", data=body, method="POST",
+                                     headers={"Authorization": f"Bearer {key}",
+                                              "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=90) as resp:
+            content = json.loads(resp.read())["choices"][0]["message"]["content"]
+        m = re.search(r"\[[\s\S]*\]", content)
+        return json.loads(m.group(0)) if m else None
+    except Exception as e:  # never let an optional LLM break the run
+        log(f"  LLM call failed: {e}")
+        return None
+
+
+def llm_tasks(personal, recent_titles, n=25):
     courses = ", ".join((c if isinstance(c, str) else c.get("name", "")) for c in personal.get("courses", []))
     projects = ", ".join((p if isinstance(p, str) else p.get("name", "")) for p in personal.get("projects", []))
     prompt = (
@@ -400,20 +418,8 @@ def llm_tasks(personal, recent_titles, n=25):
         'Return ONLY a JSON array of [title, "q" or "b", area] where area is a course name, a project name, '
         "or one of chores, errands, tech, social, family, health, self, admin, finance. Titles 3 to 9 words."
     )
-    body = json.dumps({"model": model, "messages": [{"role": "user", "content": prompt}],
-                       "temperature": 0.9}).encode()
-    request = urllib.request.Request(base.rstrip("/") + "/chat/completions", data=body, method="POST",
-                                     headers={"Authorization": f"Bearer {key}",
-                                              "Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(request, timeout=90) as resp:
-            content = json.loads(resp.read())["choices"][0]["message"]["content"]
-        m = re.search(r"\[[\s\S]*\]", content)
-        items = json.loads(m.group(0)) if m else []
-        return [mk_task(t) for t in items if t and (isinstance(t, (list, dict)))]
-    except Exception as e:  # never let an optional LLM break the run
-        log(f"  LLM refill failed: {e}")
-        return []
+    items = llm_array(prompt, 0.9) or []
+    return [mk_task(t) for t in items if t and (isinstance(t, (list, dict)))]
 
 
 # ---------------------------------------------------------------- project context
@@ -651,16 +657,23 @@ class Ctx:
         f = issue["fields"]
         sp = f.get(self.f["story_points"]) if self.f.get("story_points") else None
         size = "q" if (isinstance(sp, (int, float)) and sp <= 1) else "b"
-        words = norm(f.get("summary"))
-        area = "self"
+        return {"a": self.guess_area(f.get("summary")), "s": size, "d": None}
+
+    def guess_area(self, title):
+        words = set(norm(title).split())
         for c in self.pool.courses + self.pool.projects:
-            if tokens(c.get("short") or c["name"]) & set(words.split()):
-                area = c["name"]
-                break
-        else:
-            if any(w in words for w in ("quiz", "assignment", "lab", "lecture", "exam", "class")):
-                area = "course" if not self.pool.courses else self.pool.courses[0]["name"]
-        return {"a": area, "s": size, "d": None}
+            if tokens(c.get("short") or c["name"]) & words:
+                return c["name"]
+        if words & {"quiz", "assignment", "lab", "lecture", "exam", "class"}:
+            return "course" if not self.pool.courses else self.pool.courses[0]["name"]
+        for e in self.epics:  # a word from one of your epics, like "DBMS" or "Robocat"
+            if tokens(e["summary"]) & words:
+                return e["summary"]
+        return "self"
+
+    def is_real(self, key):
+        """Tasks you added yourself through the inbox: sorted and planned, never closed or re-dated for you."""
+        return bool(self.st.get("meta", {}).get(key, {}).get("real"))
 
     def remember(self, key, data):
         self.st.setdefault("meta", {})[key] = data
@@ -763,9 +776,10 @@ def phase_night(ctx):
                 epic = ctx.epic_for(inf["a"])
                 if epic:
                     ctx.edit(k, {"parent": {"key": epic}})
-            if inf["s"] == "q" and rng.random() < 0.35:
+            real = ctx.is_real(k)
+            if not real and inf["s"] == "q" and rng.random() < 0.35:
                 ctx.finish(k)
-            elif S.get("deferred") and rng.random() < 0.25:
+            elif not real and S.get("deferred") and rng.random() < 0.25:
                 if f.get("defer_until"):
                     ctx.edit(k, {f["defer_until"]: ctx.day(rng.randint(1, 5))})
                 ctx.move(k, "deferred")
@@ -791,7 +805,7 @@ def phase_night(ctx):
     scope = ctx.sjql("review", "in_progress", "plan", "backlog")
     if not scope:
         return
-    open_ = ctx.find(scope)
+    open_ = [i for i in ctx.find(scope) if not ctx.is_real(i["key"])]
     budget = min(rng.randint(3, 7), max(0, len(open_) - 3))
     today, changed, touched = ctx.day(), 0, []
 
@@ -867,9 +881,9 @@ def process(ctx, todo, allow_later=True, gap=None):
             e = ctx.epic_for(inf["a"])
             fields["parent"] = {"key": e} if e else None
         if f.get("story_points") and not fl.get(f["story_points"]):
-            fields[f["story_points"]] = 1 if quick else rng.choice([2, 3, 3, 5, 5, 8])
+            fields[f["story_points"]] = inf.get("p") or (1 if quick else rng.choice([2, 3, 3, 5, 5, 8]))
         if f.get("deep_shallow"):
-            deep = (not quick) and rng.random() < 0.75
+            deep = (inf["m"] >= 45) if inf.get("m") else (not quick) and rng.random() < 0.75
             fields[f["deep_shallow"]] = ctx.option(k, "deep_shallow", ["deep"] if deep else ["shallow"])
         if f.get("task_size"):
             fields[f["task_size"]] = ctx.option(k, "task_size",
@@ -879,7 +893,7 @@ def process(ctx, todo, allow_later=True, gap=None):
         title = norm(fl.get("summary"))
         if any(w in title for w in PLAN_WORDS) and S.get("plan"):
             ctx.move(k, "plan")
-        elif allow_later and (not quick) and S.get("later") and rng.random() < 0.08:
+        elif allow_later and not ctx.is_real(k) and (not quick) and S.get("later") and rng.random() < 0.08:
             ctx.move(k, "later")
         elif S.get("process_today"):
             ctx.move(k, "backlog")
@@ -1114,6 +1128,175 @@ def phase_urgent_followup(ctx):
     u["stage"] = "closed"
 
 
+# ---------------------------------------------------------------- your own tasks (GitHub issue inbox)
+
+WEEKDAYS = {"monday": 0, "mon": 0, "tuesday": 1, "tues": 1, "tue": 1, "wednesday": 2, "wed": 2,
+            "thursday": 3, "thurs": 3, "thur": 3, "thu": 3, "friday": 4, "fri": 4,
+            "saturday": 5, "sat": 5, "sunday": 6, "sun": 6}
+MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+DUR_RE = re.compile(r"\b(\d+(?:\.\d+)?)\s*(?:hours|hour|hrs|hr|h)(?:\b|(?=\d))(?:\s*(\d+)\s*(?:m|min|mins|minutes)\b)?"
+                    r"|\b(\d+)\s*(?:m|min|mins|minute|minutes)\b", re.I)
+_MON = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*"
+DUE_RE = re.compile(r"\b(?:(?:by|on|due|before)\s+)?(today|tonight|tomorrow|tmrw|tmr|next week|in \d+ days?|"
+                    + "|".join(sorted(WEEKDAYS, key=len, reverse=True)) +
+                    rf"|\d{{4}}-\d{{2}}-\d{{2}}|\d{{1,2}}\s+{_MON}|{_MON}\s+\d{{1,2}}|\d{{1,2}}/\d{{1,2}})\b", re.I)
+
+
+def parse_minutes(text):
+    m = DUR_RE.search(text or "")
+    if not m:
+        return None
+    if m.group(3):
+        return int(m.group(3))
+    return round(float(m.group(1)) * 60 + int(m.group(2) or 0))
+
+
+def parse_when(ctx, text):
+    """'today', 'tmrw', 'fri', 'in 3 days', '24 oct', 'oct 24', '24/10', '2026-10-24' -> ISO date."""
+    t = " ".join((text or "").lower().replace(",", " ").split()).removeprefix("by ").removeprefix("on ").removeprefix("due ").removeprefix("before ").strip()
+    today = ctx.today()
+    if t in ("today", "tonight", "now", "asap"):
+        return ctx.day()
+    if t in ("tomorrow", "tmrw", "tmr"):
+        return ctx.day(1)
+    if t == "next week":
+        return ctx.day(7)
+    m = re.fullmatch(r"(?:in )?(\d+) days?", t)
+    if m:
+        return ctx.day(int(m.group(1)))
+    if t in WEEKDAYS:
+        return ctx.day((WEEKDAYS[t] - today.weekday()) % 7)
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", t):
+        return t
+    m = re.fullmatch(r"(\d{1,2}) ([a-z]+)|([a-z]+) (\d{1,2})|(\d{1,2})/(\d{1,2})", t)
+    if not m:
+        return None
+    if m.group(5):
+        d, mon = int(m.group(5)), int(m.group(6))
+    else:
+        d, name = (int(m.group(1)), m.group(2)) if m.group(1) else (int(m.group(4)), m.group(3))
+        if name[:3] not in MONTHS:
+            return None
+        mon = MONTHS.index(name[:3]) + 1
+    try:
+        when = today.replace(month=mon, day=d)
+    except ValueError:
+        return None
+    if when < today:
+        when = when.replace(year=when.year + 1)
+    return when.isoformat()
+
+
+def points_for(minutes):
+    return 1 if minutes <= 15 else 2 if minutes <= 60 else 3 if minutes <= 150 else 5 if minutes <= 300 else 8
+
+
+def split_line(ctx, line):
+    """'Finish DB lab | 2h | fri | DBMS' or free text like 'Finish DB lab by fri, 2h' -> (title, minutes, due, area)."""
+    if "|" in line:
+        parts = [x.strip() for x in line.split("|")]
+        title, minutes, due, area = parts[0], None, None, None
+        for x in parts[1:]:
+            if minutes is None and parse_minutes(x) is not None:
+                minutes = parse_minutes(x)
+            elif due is None and parse_when(ctx, x):
+                due = parse_when(ctx, x)
+            elif x:
+                area = x
+        return title, minutes, due, area
+    title, minutes, due = line, None, None
+    m = DUR_RE.search(title)
+    if m:
+        minutes, title = parse_minutes(m.group(0)), title[:m.start()] + title[m.end():]
+    m = DUE_RE.search(title)
+    at_end = m and not title[m.end():].strip(" ,;.)")
+    prefixed = m and re.match(r"(?:by|on|due|before)\s", m.group(0), re.I)
+    if m and (at_end or prefixed) and parse_when(ctx, m.group(0)):
+        due, title = parse_when(ctx, m.group(0)), title[:m.start()] + title[m.end():]
+    title = re.sub(r"\s{2,}", " ", re.sub(r"[\s,;:(\-]+$|\(\s*\)", "", title)).strip(" ,;-")
+    return title, minutes, due, None
+
+
+def llm_inbox(ctx, text):
+    prompt = (f"Today is {ctx.today().strftime('%A %d %B %Y')}. Turn this to-do text into tasks.\n"
+              "Return ONLY a JSON array of [title, minutes or null, due date YYYY-MM-DD or null]. "
+              "Titles 3 to 9 words, the way a student types a to-do. Keep every task, add none.\n\n" + text)
+    items = llm_array(prompt, 0.2) or []
+    out = []
+    for it in items:
+        if isinstance(it, list) and it and isinstance(it[0], str) and it[0].strip():
+            minutes = it[1] if len(it) > 1 and isinstance(it[1], (int, float)) else None
+            due = it[2] if len(it) > 2 and isinstance(it[2], str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", it[2]) else None
+            out.append((it[0].strip(), int(minutes) if minutes else None, due, None))
+    return out
+
+
+def phase_inbox(ctx, title, body):
+    """Your own tasks, written as a GitHub issue. One task per line. Lines starting with
+    'done' close a task you added earlier, by key or by title."""
+    log("Inbox: adding your own tasks")
+    text = body if (body or "").strip() else title
+    lines = []
+    for raw in (text or "").splitlines():
+        line = re.sub(r"^\s*(?:[-*\u2022]|\d+[.)])?\s*(?:\[[ xX]?\])?\s*", "", raw).strip()
+        if line and not line.endswith(":") and not line.startswith("#"):
+            lines.append(line)
+    done = [re.sub(r"^(?:done|finished|completed?)\b\s*[:\-]?\s*", "", l, flags=re.I) for l in lines
+            if re.match(r"(?:done|finished|completed?)\b", l, re.I)]
+    todo = [l for l in lines if not re.match(r"(?:done|finished|completed?)\b", l, re.I)][:30]
+    report = []
+
+    if done:
+        mine = [i for i in ctx.find("statusCategory != Done") if ctx.is_real(i["key"])]
+        for want in done:
+            key = re.search(r"\b[A-Z][A-Z0-9]+-\d+\b", want)
+            hit = next((i for i in mine if key and i["key"] == key.group(0)), None)
+            if not hit:
+                w = tokens(want)
+                scored = [(len(w & tokens(i["fields"]["summary"])) / max(1, len(w)), i) for i in mine]
+                best = max(scored, key=lambda x: x[0], default=(0, None))
+                hit = best[1] if best[0] >= 0.6 else None
+            if hit and ctx.finish(hit["key"]):
+                ctx.comment(hit["key"], "done")
+                report.append(f"Closed {hit['key']} {hit['fields']['summary']}")
+            else:
+                report.append(f"Could not find an open task of yours matching \"{want}\"")
+
+    items = []
+    if todo:
+        if not any("|" in l for l in todo):
+            items = llm_inbox(ctx, "\n".join(todo))
+        items = items or [split_line(ctx, l) for l in todo]
+    for title_, minutes, due, area in items:
+        if not title_:
+            continue
+        size = "q" if minutes is not None and minutes <= 15 else "b"
+        due = due or (ctx.day(rng.randint(0, 2)) if size == "q" else ctx.day(rng.randint(2, 7)))
+        if minutes:
+            hours = minutes / 60
+            desc = f"About {minutes} minutes." if minutes < 60 else \
+                f"About {hours:g} hour{'s' if hours != 1 else ''}." if hours == int(hours) or hours < 3 \
+                else f"About {round(hours)} hours."
+        else:
+            desc = rng.choice(DESC[size])
+        t = {"t": title_[:200], "s": size, "a": area or ctx.guess_area(title_), "d": ""}
+        key = create_task(ctx, t, due, desc)
+        if not key:
+            continue
+        ctx.st["meta"][key].update(real=True, m=minutes, p=points_for(minutes) if minutes else None)
+        when = parse_day(due)
+        report.append(f"Added {key} {title_}, due {when.strftime('%a %d %b')}" +
+                      (f", {desc[6:-1]}" if minutes else ""))
+    if not report:
+        report.append("Nothing to add. Write one task per line, like: Finish DB lab | 2h | fri")
+    out = os.environ.get("INBOX_RESULT")
+    if out:
+        with open(out, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(f"- {r}" for r in report) + "\n")
+    for r in report:
+        log(f"  {r}")
+
+
 # ---------------------------------------------------------------- scheduler
 
 def rand_time(window):
@@ -1219,7 +1402,7 @@ def cmd_audit(ctx):
 def main():
     ap = argparse.ArgumentParser(description="Keep a Jira project active on a human-looking schedule.")
     ap.add_argument("command", nargs="?", default="tick",
-                    choices=["tick", "check", "audit", "kickoff", "urgent", "drop", "morning", "night", "sprint", "refill"])
+                    choices=["tick", "check", "audit", "kickoff", "urgent", "inbox", "drop", "morning", "night", "sprint", "refill"])
     ap.add_argument("--dry-run", action="store_true", help="show actions without changing Jira")
     ap.add_argument("--count", type=int, help="items to add with 'drop'")
     args = ap.parse_args()
@@ -1258,6 +1441,8 @@ def main():
             phase_kickoff(ctx)
         elif args.command == "urgent":
             phase_urgent(ctx)
+        elif args.command == "inbox":
+            phase_inbox(ctx, os.environ.get("ISSUE_TITLE", ""), os.environ.get("ISSUE_BODY", ""))
         elif args.command == "drop":
             phase_drop(ctx, args.count)
         elif args.command == "morning":

@@ -8,6 +8,7 @@ Keeps your Jira project active without you opening Jira. It follows a normal stu
 | Morning, random time 8:00 to 9:30 | Reviews deferred tasks, re-defers some, starts 1 to 3 tasks. |
 | Night, random time 10:00 to 11:30 | Triages the inbox, sets epic, component, due date, story points, assignee, priority. Moves work along and finishes some. |
 | Every 2 days, before the night run | Plans, starts and closes 1-week sprints. |
+| Whenever you open an issue | Your real tasks land in the inbox with your times and due dates. Mixed in with the rest, never closed for you. |
 | About 1 day in 4, at a random time | Something urgent comes up: one task due today, top priority, pulled into the sprint and started. A few hours later it goes to review and gets closed. Now and then it slips a day. |
 
 It runs free on GitHub Actions, so your laptop can stay off. It uses **zero AI tokens** day to day. You use a chatbot once, at setup, if you want personal tasks.
@@ -62,6 +63,27 @@ Out of the box it uses a built-in list of about 140 everyday tasks. To add tasks
 3. Save its reply as `tasks.json` in the repo (**Add file → Create new file**, name it `tasks.json`, paste, commit).
 
 `tasks.example.json` shows the format. The reply also has a short `urgent` list, used on urgent days. Without one, it uses built-in urgent tasks.
+
+### 6. Optional: add your real tasks from your phone
+Open a new **issue** in your repo (the GitHub app works) and write one task per line:
+
+```
+Finish DB lab report | 2h | fri
+Call the bank about the card | 10m | today
+Prepare SEPM presentation | 4h | 24 oct | SEPM
+done PER-42
+```
+
+- **Format:** `title | time | due | epic`. Everything after the title is optional, in any order. A bare title works too.
+- **Time:** `10m`, `45 min`, `2h`, `1h30m`. It sets the size and story points: up to 15 min is quick (1 point), about 1h is 2, 2h is 3, 4h is 5, longer is 8.
+- **Due:** `today`, `tmrw`, `fri`, `in 3 days`, `24 oct`, `2026-11-02`.
+- **Epic:** optional. Without one, it picks the epic whose name matches a word in the title.
+- **`done ...`:** a line starting with `done` closes one of your own tasks, by key or by title.
+
+Within a minute it adds them to your inbox, replies with the new keys, and closes the issue. The night run sorts them with everything else.
+**Your own tasks are never closed, deferred or re-dated for you.** Only a `done` line or you in Jira closes them.
+If you set up an AI key (see AI refills), you can also write free text, like "finish the DB lab by friday, about 2 hours". Without a key, plain text still works for simple lines like `Finish DB lab by fri, 2h`.
+Only issues you open count. Anyone else's are ignored.
 
 ---
 
@@ -121,6 +143,7 @@ python autopilot.py audit      short summary for the setup prompt
 python autopilot.py tick       run whatever is due (what the schedule calls)
 python autopilot.py kickoff    first-run setup now: a few tasks and a starter sprint
 python autopilot.py urgent     an urgent task comes up now (the schedule closes it hours later)
+python autopilot.py inbox      add your own tasks from ISSUE_TITLE / ISSUE_BODY (what the issue workflow runs)
 python autopilot.py drop       add inbox items now  (--count 2 for a fixed number)
 python autopilot.py morning    run the morning routine now
 python autopilot.py night      run the night routine now
