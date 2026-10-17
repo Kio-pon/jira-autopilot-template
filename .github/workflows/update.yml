@@ -1,0 +1,64 @@
+name: jira-autopilot-update
+
+# Pulls the latest version from the shared template, once a week or when you click Run.
+# Needs a TEMPLATE_KEY secret (a read-only key from whoever shared this with you).
+# Without it this does nothing. Your config.json, tasks.json and secrets are never touched.
+on:
+  schedule:
+    - cron: "23 2 * * 1"  # Mondays, 07:23 Pakistan time
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: jira-autopilot
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get the latest version
+        id: get
+        env:
+          TEMPLATE_KEY: ${{ secrets.TEMPLATE_KEY }}
+          TEMPLATE_REPO: ${{ vars.TEMPLATE_REPO || 'FaltoCourse/jira-autopilot-template' }}
+        run: |
+          if [ -z "$TEMPLATE_KEY" ]; then
+            echo "No TEMPLATE_KEY secret, so updates are off. See README, Getting updates."
+            exit 0
+          fi
+          key="$RUNNER_TEMP/template_key"
+          printf '%s\n' "$TEMPLATE_KEY" > "$key"
+          chmod 600 "$key"
+          GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
+            git clone --depth 1 "git@github.com:$TEMPLATE_REPO.git" "$RUNNER_TEMP/latest"
+          rm -f "$key"
+          echo "fetched=1" >> "$GITHUB_OUTPUT"
+      - name: Test the new version before using it
+        if: steps.get.outputs.fetched == '1'
+        run: python3 "$RUNNER_TEMP/latest/tests/run_tests.py" --quick
+      - name: Apply it
+        if: steps.get.outputs.fetched == '1'
+        run: |
+          for f in autopilot.py generic_tasks.json README.md SETUP_PROMPT.md LICENSE tasks.example.json .env.example tests; do
+            if [ -e "$RUNNER_TEMP/latest/$f" ]; then
+              rm -rf "./$f"
+              cp -r "$RUNNER_TEMP/latest/$f" "./$f"
+            fi
+          done
+          if ! diff -rq "$RUNNER_TEMP/latest/.github/workflows" .github/workflows > /dev/null; then
+            echo "::notice::The workflow files changed too. GitHub does not let a workflow edit workflows, so copy the files in .github/workflows from the template by hand."
+          fi
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "Already up to date."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Update Jira Autopilot from the template"
+          git push

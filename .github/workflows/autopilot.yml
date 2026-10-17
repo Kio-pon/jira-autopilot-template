@@ -2,21 +2,27 @@ name: jira-autopilot
 
 on:
   schedule:
-    # Every 30 minutes from 08:07 to 00:37 Pakistan time (03:07 to 19:37 UTC).
-    # The script decides what is actually due, so this only needs to run often.
-    # Other time zones: shift the hour range by your UTC offset.
-    - cron: "7,37 3-19 * * *"
+    # Pakistan time (UTC+5): hourly from 08:07 to 20:07, then every 30 minutes until 00:37,
+    # because the night routine runs in three steps about half an hour apart.
+    # The script decides what is actually due, so these only need to run often enough.
+    # Other time zones: shift both hour ranges by the difference from UTC+5.
+    - cron: "7 3-15 * * *"
+    - cron: "7,37 16-19 * * *"
   workflow_dispatch:
     inputs:
       command:
         description: "What to run"
         type: choice
-        options: [tick, check, audit, kickoff, urgent, drop, morning, night, sprint, refill]
+        options: [tick, check, audit, kickoff, urgent, drop, morning, night, sprint, edit, refill]
         default: tick
       dry_run:
         description: "Dry run (show actions, change nothing)"
         type: boolean
         default: false
+
+permissions:
+  contents: read
+  issues: write
 
 concurrency:
   group: jira-autopilot
@@ -36,8 +42,31 @@ jobs:
           # A variable, not a secret: GitHub masks secret values in logs, which would turn PER-98 into ***-98.
           JIRA_PROJECT: ${{ vars.JIRA_PROJECT || secrets.JIRA_PROJECT }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ALERT_FILE: ${{ runner.temp }}/alert.md
+          HEALTHY_FILE: ${{ runner.temp }}/healthy
+          CMD: ${{ github.event.inputs.command || 'tick' }}
+          DRY: ${{ github.event.inputs.dry_run }}
         run: |
-          CMD="${{ github.event.inputs.command || 'tick' }}"
           FLAG=""
-          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then FLAG="--dry-run"; fi
+          if [ "$DRY" = "true" ]; then FLAG="--dry-run"; fi
           python3 autopilot.py "$CMD" $FLAG
+      - name: Open or close the "needs attention" issue
+        # One issue when something is wrong (an expired token, three failed runs in a row),
+        # closed again by the next run that works. No email for every failed run.
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ALERT_FILE: ${{ runner.temp }}/alert.md
+          HEALTHY_FILE: ${{ runner.temp }}/healthy
+        run: |
+          open=$(gh issue list --repo "$GITHUB_REPOSITORY" --label autopilot-alert --state open --json number -q '.[0].number')
+          if [ -s "$ALERT_FILE" ]; then
+            if [ -z "$open" ]; then
+              gh label create autopilot-alert --repo "$GITHUB_REPOSITORY" --color B60205 \
+                --description "Jira Autopilot needs attention" 2>/dev/null || true
+              gh issue create --repo "$GITHUB_REPOSITORY" --title "Autopilot needs attention" \
+                --label autopilot-alert --body-file "$ALERT_FILE"
+            fi
+          elif [ -n "$open" ] && [ -f "$HEALTHY_FILE" ]; then
+            gh issue close "$open" --repo "$GITHUB_REPOSITORY" --comment "Working again, closing this."
+          fi

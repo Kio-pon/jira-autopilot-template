@@ -1,16 +1,17 @@
 name: jira-inbox
 
-# Open an issue in this repo with your own tasks, one per line:
-#   Finish DB lab report | 2h | fri
-#   Call the bank about the card | 10m | today
-#   done PER-42
-# They land in your Jira inbox, then this workflow replies and closes the issue.
+# Open an issue in this repo:
+#   - Your own tasks, one per line:      Finish DB lab report | 2h | fri
+#                                         done PER-42
+#   - Title starting with "setup":       describe yourself in the body (uni, courses with short
+#                                         names, projects, a normal week) and Gemini writes tasks.json.
+# It replies with what it did and closes the issue.
 on:
   issues:
     types: [opened]
 
 permissions:
-  contents: read
+  contents: write
   issues: write
 
 concurrency:
@@ -22,10 +23,10 @@ jobs:
     # Only your own issues count. Anyone else's are ignored, which matters on a public repo.
     if: github.event.issue.user.login == github.repository_owner
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Add tasks to Jira
+      - name: Add tasks to Jira, or write tasks.json
         env:
           JIRA_SITE: ${{ secrets.JIRA_SITE }}
           JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
@@ -35,7 +36,24 @@ jobs:
           ISSUE_TITLE: ${{ github.event.issue.title }}
           ISSUE_BODY: ${{ github.event.issue.body }}
           INBOX_RESULT: ${{ runner.temp }}/inbox.md
-        run: python3 autopilot.py inbox
+        run: |
+          if printf '%s' "$ISSUE_TITLE" | grep -qiE '^[[:space:]]*(setup|about me)'; then
+            python3 autopilot.py setup
+          else
+            python3 autopilot.py inbox
+          fi
+      - name: Save tasks.json
+        if: success()
+        env:
+          NUMBER: ${{ github.event.issue.number }}
+        run: |
+          if [ -n "$(git status --porcelain tasks.json)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add tasks.json
+            git commit -m "Personal task list from issue #$NUMBER"
+            git push
+          fi
       - name: Reply and close
         if: success()
         env:
@@ -48,4 +66,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           NUMBER: ${{ github.event.issue.number }}
-        run: gh issue comment "$NUMBER" --repo "$GITHUB_REPOSITORY" --body "Could not add these. Open the jira-inbox run in the Actions tab to see why."
+        run: gh issue comment "$NUMBER" --repo "$GITHUB_REPOSITORY" --body "Could not do this. Open the jira-inbox run in the Actions tab to see why."

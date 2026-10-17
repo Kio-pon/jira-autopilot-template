@@ -1,0 +1,18 @@
+name: tests
+
+# The simulator: 30 days on a fake Jira, checked for anything unsafe or robotic. About a minute.
+on:
+  push:
+    paths: ["autopilot.py", "generic_tasks.json", "config.json", "tests/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 tests/run_tests.py
