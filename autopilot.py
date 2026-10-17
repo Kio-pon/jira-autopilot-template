@@ -80,6 +80,7 @@ DEFAULTS = {
     "sprint_name_prefix": "",
     "kickoff_tasks": [4, 6],
     "gemini_model": "gemini-3.8-flash",
+    "context_file": "context.md",
     "urgent_day_chance": 0.25,
     "urgent_work_hours": [1.0, 4.0],
     "urgent_slip_chance": 0.15,
@@ -532,15 +533,37 @@ def llm_array(prompt, model):
     return llm_json(prompt, model, "[")
 
 
+CONTEXT_LIMIT = 8000  # characters of context.md sent to Gemini
+
+
+def load_context(path):
+    """context.md: a short, regularly refreshed description of you and your current work."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read().strip()[:CONTEXT_LIMIT]
+    except FileNotFoundError:
+        return ""
+
+
+def about(personal):
+    if personal.get("context"):
+        return "About this person, kept up to date every week:\n" + personal["context"] + "\n"
+    return f"Person: {personal.get('profile', 'a university student')}\n"
+
+
 def llm_tasks(personal, recent_titles, model, n=25):
     courses = ", ".join((c if isinstance(c, str) else c.get("name", "")) for c in personal.get("courses", []))
     projects = ", ".join((p if isinstance(p, str) else p.get("name", "")) for p in personal.get("projects", []))
+    focus = ("Base most course and project tasks on what they are working on right now and what is coming up. "
+             "Name the real assignment, feature, bug or deadline instead of something generic.\n"
+             if personal.get("context") else "")
     prompt = (
         f"Generate {n} new to-do items for this person's personal Jira board.\n"
-        f"Person: {personal.get('profile', 'a university student')}\n"
+        + about(personal) +
         f"Courses: {courses or 'none'}\nProjects: {projects or 'none'}\n"
         f"Avoid these recent titles: {'; '.join(list(recent_titles)[:40])}\n"
         "Mix about half everyday life tasks and half course or project tasks. About 40% quick (under 10 min).\n"
+        + focus +
         'Return ONLY a JSON array of [title, "q" or "b", area] where area is a course name, a project name, '
         "or one of chores, errands, tech, social, family, health, self, admin, finance. Titles 3 to 9 words."
     )
@@ -551,7 +574,7 @@ def llm_tasks(personal, recent_titles, model, n=25):
 def llm_comments(personal, model):
     prompt = (
         "Write 40 short comments a university student leaves on their own Jira tasks.\n"
-        f"Student: {personal.get('profile', 'a university student')}\n"
+        + about(personal) +
         "Casual and specific, 3 to 12 words, no emojis, no hashtags, no names of tasks.\n"
         "About 8 of each kind: start, progress, done, push (postponing), review (finished, checking once more).\n"
         "Return ONLY a JSON array of [kind, comment]."
@@ -652,6 +675,8 @@ class Ctx:
         """Remember when the autopilot last changed an issue, so your own edits can be told apart.
         Called after every change, so it also leaves a few seconds before the next click."""
         m = self.st.get("meta", {}).get(key)
+        if m is None and self.cfg["touch_existing_tasks"]:  # your older tasks too, once it changes them
+            m = self.meta(key)
         if m is not None:
             m["bt"] = round(utcnow().timestamp())
         if not self.j.dry:
@@ -687,7 +712,7 @@ class Ctx:
         if ok:
             m = self.st.get("meta", {}).get(key)
             if m is not None:
-                for k in [k for k in m if k not in ("a", "s", "p", "real")]:
+                for k in [k for k in m if k not in ("a", "s", "p", "real", "ty")]:
                     m.pop(k)
                 m["x"] = 1
         return ok
@@ -853,12 +878,17 @@ class Ctx:
 
     def info(self, issue):
         m = self.st.get("meta", {}).get(issue["key"])
-        if m:
+        if m and "a" in m and "s" in m:
             return m
-        f = issue["fields"]
+        f = issue.get("fields") or {}
         sp = f.get(self.f["story_points"]) if self.f.get("story_points") else None
         size = "q" if (isinstance(sp, (int, float)) and sp <= 1) else "b"
-        return {"a": self.guess_area(f.get("summary")), "s": size, "d": None}
+        guess = {"a": self.guess_area(f.get("summary")), "s": size, "d": None}
+        if m is not None:  # an older task it has only touched: keep what it knows, fill the rest
+            for k, v in guess.items():
+                m.setdefault(k, v)
+            return m
+        return guess
 
     def guess_area(self, title):
         words = set(norm(title).split())
@@ -945,13 +975,22 @@ def phase_drop(ctx, count=None, pace=None):
     used = {norm(i["fields"]["summary"]) for i in recent}
     used |= {norm(m["ty"]) for m in st.get("meta", {}).values() if m.get("ty")}
     ts = utcnow().timestamp()
-    if len(ctx.pool.fresh(ctx.pool.specific, used)) < 10 and gemini_key() and ts >= st.get("llm_after", 0):
+    context = ctx.personal.get("context", "")
+    ctx_hash = format(sum(ord(c) * (n + 1) for n, c in enumerate(context)) % 1000003, "x") if context else None
+    changed = ctx_hash and ctx_hash != st.get("ctx_hash") and ts >= st.get("ctx_after", 0)
+    low = len(ctx.pool.fresh(ctx.pool.specific, used)) < 10 and ts >= st.get("llm_after", 0)
+    if gemini_key() and (changed or low):
         st["llm_after"] = ts + 3 * 86400  # at most one idea refill every three days
+        st["ctx_after"] = ts + 86400       # and at most one a day when your context changes
         extra = llm_tasks(ctx.personal, [i["fields"]["summary"] for i in recent], cfg["gemini_model"])
         if extra:
-            st["extra"] = (st.get("extra", []) + [[t["t"], t["s"], t["a"]] for t in extra])[-80:]
+            new = [[t["t"], t["s"], t["a"]] for t in extra]
+            # fresh ideas from a new context go first, older ones fade out
+            st["extra"] = (new + st.get("extra", [])[:30]) if changed else (st.get("extra", []) + new)[-80:]
             ctx.pool.specific += extra
-            log(f"  refilled {len(extra)} ideas from Gemini")
+            if ctx_hash:
+                st["ctx_hash"] = ctx_hash
+            log(f"  refilled {len(extra)} ideas from Gemini" + (" (your context changed)" if changed else ""))
     n = count or weighted([1, 2, 3], [80, 17, 3] if st.get("weekend") else cfg["drop_count_weights"])
     ratio = cfg["weekend_everyday_ratio"] if st.get("weekend") else cfg["everyday_ratio"]
     picks = ctx.pool.pick(n, used, ratio, cfg["quick_ratio"])
@@ -1013,6 +1052,15 @@ def phase_morning(ctx):
             elif ctx.f.get("defer_until"):
                 ctx.edit(i["key"], {ctx.f["defer_until"]: ctx.day(rng.randint(2, 6))})
                 log(f"  {i['key']}: deferred again")
+    if S.get("in_progress") and S.get("backlog"):  # too much on the go: put the stalest back for now
+        meta = ctx.st.get("meta", {})
+        wip = [i for i in ctx.find(f"status = {jq(S['in_progress'])}", order="ORDER BY updated ASC")
+               if not ctx.is_real(i["key"]) and not meta.get(i["key"], {}).get("urg")]
+        for i in wip[:max(0, len(wip) - ctx.cfg["wip_limit"] - 1)][:2]:
+            breathe(ctx)
+            if ctx.move(i["key"], "backlog"):
+                if rng.random() < 0.5:
+                    ctx.comment(i["key"], "push")
     start_next(ctx, rng.randint(1, 2))
 
 
@@ -2049,6 +2097,7 @@ def main():
     st = store.load()
     generic = load_json(os.path.join(HERE, "generic_tasks.json"), {})
     personal = load_json(os.path.join(HERE, "tasks.json"), {})
+    personal["context"] = load_context(os.path.join(HERE, cfg["context_file"]))
     try:
         ctx = Ctx(cfg, jira, st, generic, personal)
     except JiraError as e:

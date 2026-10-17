@@ -230,8 +230,16 @@ def test_setup():
 
 # ---------------------------------------------------------------- simulation
 
+OLD_TASKS = ["Pick up Visa", "Apply for internships", "Update CV and LinkedIn", "Scan past notes", "Eyesight checkup",
+             "Draft ER diagram for smart home DB", "Decide FYP group members", "Explore CAD work for Robocat",
+             "Meeting with Bareera for Robocat", "Decide group partners for EDI", "Laptop repair", "Return library books",
+             "Renew gym membership", "Set up Supabase auth for Voltrix", "Fix VGA timing in Basys3 Studio",
+             "Write DCN lab 4 report", "Revise DBMS normalization", "Book dentist appointment", "Pay hostel dues",
+             "Clean up GitHub profile"]
+
+
 class Sim:
-    def __init__(self, seed, kind, days, personal=True):
+    def __init__(self, seed, kind, days, personal=True, existing=False):
         self.ap = ap = load_autopilot()
         ap.rng.seed(seed)
         self.r = random.Random(seed * 7919 + 1)
@@ -249,6 +257,23 @@ class Sim:
         self.real, self.asked_done, self.urgent = set(), set(), set()
         self.human_days = set()
         self.snapshots = []  # (local day, inbox ages in days, active sprint?, bot WIP)
+        self.existing = set()
+        if existing:  # a board you have used for a while, and the autopilot allowed to touch all of it
+            cfg["touch_existing_tasks"] = True
+            mix = [S07] * 6 + [S04] * 14 + [S02] * 3 + [S08] * 4 + ["09 - PLAN"] * 4 + [S05] * 4 + [S01] * 10
+            for n in range(45):
+                k = self.jira._new("Task", OLD_TASKS[n % len(OLD_TASKS)] + ("" if n < 20 else f" part {n // 20 + 1}"))
+                i = self.jira.issues[k]
+                i["created"] = i["updated"] = self.t0 - timedelta(days=self.r.randint(3, 40))
+                plain = {S07: "To Do", S04: "To Do", S08: "To Do", "09 - PLAN": "To Do", S05: "To Do",
+                         S02: "In Progress", S01: "Done"}
+                i["status"] = mix[n % len(mix)] if kind == "sepm" else plain[mix[n % len(mix)]]
+                if i["status"] not in (S07,) and kind == "sepm":
+                    i["parent"] = self.r.choice(sorted(self.jira.epics()))
+                    i["components"] = ["Admin & Errands"]
+                if self.r.random() < 0.6:
+                    i["duedate"] = (self.t0 + timedelta(days=self.r.randint(-10, 20))).date().isoformat()
+                self.existing.add(k)
 
     def local(self, t=None):
         return (t or self.clock()).astimezone(TZ)
@@ -351,7 +376,7 @@ class Sim:
     def snapshot(self, day, st):
         now = self.clock()
         inbox = [(now - i["created"]).total_seconds() / 86400 for i in self.jira.issues.values()
-                 if i["type"] != "Epic" and i["status"] == S07]
+                 if i["type"] != "Epic" and i["status"] == S07 and i["created"] >= self.t0]  # not your old backlog
         active = any(s["state"] == "active" for s in self.jira.sprints.values())
         meta = st.get("meta", {})
         wip = sum(1 for k, i in self.jira.issues.items() if i["status"] in (S02, "In Progress")
@@ -387,6 +412,22 @@ class Sim:
             if any(a == "bot" for (t, a, s, st_) in J.issues[k]["worklogs"]):
                 bad.append(f"{k} got a worklog")
         check("your own tasks untouched", not bad and self.real, f"{len(self.real)} real tasks, problems: {bad[:3]}")
+
+        # existing-board mode: your older tasks get sorted and worked, and its own edits never look like yours
+        if self.existing:
+            flagged = set()
+            for t, cmd, out in self.logs:
+                if "keeping it light" in out:
+                    flagged.add(self.local(t).date())
+            edits = Counter(self.local(t).date() for i in issues for (t, a, f, o, n) in i["history"] if a == "human")
+            false_alarms = sorted(d for d in flagged if edits[d] < 3)
+            check("its own edits never look like yours", not false_alarms, f"flagged days with no real edits: {false_alarms}")
+            old_inbox = [k for k in self.existing if J.issues[k]["status"] == S07]
+            moved = [k for k in self.existing if any(a == "bot" for (t, a, f, o, n) in J.issues[k]["history"])]
+            closed = [k for k in self.existing if any(a == "bot" and f == "status" and n in J.p["done"]
+                                                      for (t, a, f, o, n) in J.issues[k]["history"])]
+            check("your older tasks get handled", not old_inbox and len(moved) >= 0.5 * len(self.existing) and closed,
+                  f"{len(moved)}/{len(self.existing)} older tasks touched, {len(closed)} closed, {len(old_inbox)} still in the inbox")
 
         # 2. the inbox keeps up
         worst = max((s[1] for s in self.snapshots), default=0)
@@ -527,8 +568,8 @@ class Sim:
         return res, stats
 
 
-def simulate(seed, kind, days, verbose=False):
-    sim = Sim(seed, kind, days)
+def simulate(seed, kind, days, verbose=False, existing=False):
+    sim = Sim(seed, kind, days, existing=existing)
     try:
         sim.run()
     except Exception:
@@ -544,6 +585,7 @@ def main():
     ap.add_argument("--long", action="store_true", help="eight 90-day semesters on both kinds of project")
     ap.add_argument("--sweep", action="store_true", help="16 extra 30-day runs plus two 90-day ones")
     ap.add_argument("--seeds", help="a range like 301-310: every seed for --days days, every third one plain")
+    ap.add_argument("--existing", action="store_true", help="with --seeds: a board with older tasks, touch_existing_tasks on")
     ap.add_argument("--seed", type=int)
     ap.add_argument("--days", type=int, default=30)
     ap.add_argument("--kind", default=None, choices=["sepm", "plain"])
@@ -558,7 +600,8 @@ def main():
             print(f"FAIL  {test.__name__}\n{traceback.format_exc()}")
     if args.seeds:
         a, _, b = args.seeds.partition("-")
-        runs = [(n, args.kind or ("plain" if n % 3 == 0 else "sepm"), args.days) for n in range(int(a), int(b or a) + 1)]
+        runs = [(n, args.kind or ("plain" if n % 3 == 0 else "sepm"), args.days, args.existing)
+                for n in range(int(a), int(b or a) + 1)]
     elif args.sweep:
         runs = [(n, "plain" if n % 4 == 0 else "sepm", 30) for n in range(5, 21)] + [(101, "sepm", 90), (102, "plain", 90)]
     elif args.seed is not None:
@@ -568,15 +611,18 @@ def main():
     elif args.long:
         runs = [(s, "plain" if s % 4 == 0 else "sepm", 90) for s in range(101, 109)]
     else:
-        runs = [(1, "sepm", args.days), (2, "sepm", args.days), (3, "sepm", args.days), (4, "plain", args.days)]
+        runs = [(1, "sepm", args.days), (2, "sepm", args.days), (3, "sepm", args.days), (4, "plain", args.days),
+                (5, "sepm", args.days, True), (6, "plain", args.days, True)]
     quiet_total = 0
-    for seed, kind, days in runs:
-        res, stats, sim = simulate(seed, kind, days, args.verbose)
+    for run in runs:
+        seed, kind, days = run[:3]
+        existing = len(run) > 3 and run[3]
+        res, stats, sim = simulate(seed, kind, days, args.verbose, existing)
         quiet_total += stats.get("quiet", 0)
         bad = [r for r in res if not r[1]]
         failed += len(bad)
         rates = stats.get("sprints", [])
-        print(f"\n{'ok  ' if not bad else 'FAIL'}  simulation seed {seed}, {kind} project, {days} days: "
+        print(f"\n{'ok  ' if not bad else 'FAIL'}  simulation seed {seed}, {kind} project{' with your older tasks' if existing else ''}, {days} days: "
               f"{stats.get('tasks', 0)} tasks made, {stats.get('real', 0)} of yours, {stats.get('open', 0)} open at the end, "
               f"sprints {sum(rates) / max(1, len(rates)):.0%} done on average")
         for name, ok, detail in res:
