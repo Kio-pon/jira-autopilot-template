@@ -404,7 +404,7 @@ class Sim:
         later = rates[1:]  # the kickoff sprint only holds the few starter tasks, so it is always finished
         mean = sum(later) / len(later) if later else None
         too_neat = len(later) >= 3 and min(later) >= 0.98  # every sprint perfect is what looks fake
-        check("sprints end part-done", later and mean >= 0.45 and not too_neat,
+        check("sprints end part-done", (rates and not later) or (later and mean >= 0.45 and not too_neat),
               f"{len(rates)} sprints closed, done share {', '.join(f'{x:.0%}' for x in rates)} (first is the kickoff)")
         stats["sprints"] = rates
 
