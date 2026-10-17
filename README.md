@@ -8,6 +8,7 @@ Keeps your Jira project active without you opening Jira. It follows a normal stu
 | Morning, random time 8:00 to 9:30 | Reviews deferred tasks, re-defers some, starts 1 to 3 tasks. |
 | Night, random time 10:00 to 11:30 | Triages the inbox, sets epic, component, due date, story points, assignee, priority. Moves work along and finishes some. |
 | Every 2 days, before the night run | Plans, starts and closes 1-week sprints. |
+| About 1 day in 4, at a random time | Something urgent comes up: one task due today, top priority, pulled into the sprint and started. A few hours later it goes to review and gets closed. Now and then it slips a day. |
 
 It runs free on GitHub Actions, so your laptop can stay off. It uses **zero AI tokens** day to day. You use a chatbot once, at setup, if you want personal tasks.
 
@@ -52,13 +53,15 @@ It's a variable, not a secret, because GitHub hides secret values in the run log
 
 That's it. From now on it runs by itself every 30 minutes and does whatever is due.
 
+**First run.** The first scheduled run between 9am and 10pm sets up your board: it adds 4 to 6 tasks, sorts them, starts a 1-week sprint and starts one task, spread over about 10 minutes. It happens once. Don't want to wait for the schedule? **Run workflow → kickoff** does it now.
+
 ### 5. Optional: personal tasks (one chatbot message)
 Out of the box it uses a built-in list of about 140 everyday tasks. To add tasks about your own courses and projects:
 1. **Run workflow → audit**. Copy the output.
 2. Open `SETUP_PROMPT.md`, fill in "About me", paste the audit output, send it to any chatbot.
 3. Save its reply as `tasks.json` in the repo (**Add file → Create new file**, name it `tasks.json`, paste, commit).
 
-`tasks.example.json` shows the format.
+`tasks.example.json` shows the format. The reply also has a short `urgent` list, used on urgent days. Without one, it uses built-in urgent tasks.
 
 ---
 
@@ -74,6 +77,10 @@ Out of the box it uses a built-in list of about 140 everyday tasks. To add tasks
 | `quick_ratio` | `0.4` | Share of quick (under 10 min) tasks. |
 | `sprint_every_days` | `2` | How often sprints get checked. |
 | `sprint_length_days` | `7` | Sprint length. |
+| `kickoff_tasks` | `[4, 6]` | How many tasks the first run adds before starting the first sprint. |
+| `urgent_day_chance` | `0.25` | Share of days that get one urgent task. `0` turns it off. |
+| `urgent_work_hours` | `[1, 4]` | Hours an urgent task stays In Progress before review. |
+| `urgent_slip_chance` | `0.15` | Share of urgent tasks that slip to the next day instead of closing. |
 | `jitter_minutes` | `0` | Extra random wait (minutes) before acting, so actions don't land on :07 and :37. Each wait costs Actions minutes, so keep it 0 on a private repo. On a public repo or your own computer, 20 is a good value. |
 | `touch_existing_tasks` | `false` | `false`: only touches tasks it created. `true`: also triages, moves and closes your existing tasks. |
 | `label` | `""` | Put a label like `"auto"` here to tag every task it creates. |
@@ -112,6 +119,8 @@ The computer has to be on for it to run. GitHub Actions avoids that.
 python autopilot.py check      verify login and show the mapping
 python autopilot.py audit      short summary for the setup prompt
 python autopilot.py tick       run whatever is due (what the schedule calls)
+python autopilot.py kickoff    first-run setup now: a few tasks and a starter sprint
+python autopilot.py urgent     an urgent task comes up now (the schedule closes it hours later)
 python autopilot.py drop       add inbox items now  (--count 2 for a fixed number)
 python autopilot.py morning    run the morning routine now
 python autopilot.py night      run the night routine now

@@ -168,5 +168,36 @@
     ["Go through feedback on {p}", "b"],
     ["Draft a LinkedIn post about {p}", "b"],
     ["Check costs for {p}", "b"]
+  ],
+  "urgent": [
+    ["Pay the electricity bill, last day today", "q", "finance"],
+    ["Recharge internet package before it runs out", "q", "errands"],
+    ["Print and sign the form due today", "q", "admin"],
+    ["Get the passport photocopies attested today", "b", "admin"],
+    ["Pick up medicine for mum before the pharmacy closes", "q", "family"],
+    ["Fix laptop charger before tonight", "b", "tech"],
+    ["Recover the deleted assignment file", "b", "tech"],
+    ["Submit the fee challan before the bank closes", "b", "finance"],
+    ["Reply to the internship email before the deadline", "q", "career"],
+    ["Send updated CV for the referral today", "q", "career"],
+    ["Book a doctor's appointment for today", "q", "health"],
+    ["Return the library book due today", "q", "errands"],
+    ["Transfer money for the trip before tonight", "q", "finance"],
+    ["Fix the phone that stopped charging", "b", "tech"],
+    ["Get the car tyre fixed before going out", "b", "errands"]
+  ],
+  "urgent_course_templates": [
+    ["Submit {c} assignment before midnight", "b"],
+    ["{c} quiz moved to tomorrow, revise tonight", "b"],
+    ["Fix {c} lab report before the deadline", "b"],
+    ["Email {c} instructor before the form closes", "q"],
+    ["Print {c} assignment before class", "q"],
+    ["Finish {c} slides for tomorrow's presentation", "b"]
+  ],
+  "urgent_project_templates": [
+    ["Fix the crash in {p} before the demo", "b"],
+    ["Send {p} update before today's meeting", "q"],
+    ["Push a hotfix for {p}", "b"],
+    ["Get {p} running for the review today", "b"]
   ]
 }

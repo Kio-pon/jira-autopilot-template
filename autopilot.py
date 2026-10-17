@@ -6,12 +6,16 @@ Keeps a Jira project active on a human-looking daily rhythm:
   - morning: reviews deferred items and starts a few tasks
   - night: triages the inbox, fills fields, moves work along, finishes some
   - every few days: plans, starts and closes 1-week sprints
+  - some days: an urgent task comes up mid-day, joins the sprint, gets done within hours
 Needs only Python 3.9+. Uses no AI tokens day to day.
 
 Commands:
   python autopilot.py check     verify credentials and show how your project maps
   python autopilot.py audit     compact summary to paste into a chatbot (see SETUP_PROMPT.md)
   python autopilot.py tick      what the scheduler runs; does whatever is due right now
+                                (the very first tick runs the kickoff: a few tasks and a starter sprint)
+  python autopilot.py kickoff   run that first-run setup now
+  python autopilot.py urgent    something comes up: add an urgent task and start it now
   python autopilot.py drop | morning | night | sprint    force one phase now
   python autopilot.py refill    ask your LLM (optional) for fresh task ideas
 Add --dry-run to any command to see what would happen without changing Jira.
@@ -50,6 +54,10 @@ DEFAULTS = {
     "sprint_length_days": 7,
     "sprint_size": [6, 12],
     "sprint_name_prefix": "",
+    "kickoff_tasks": [4, 6],
+    "urgent_day_chance": 0.25,
+    "urgent_work_hours": [1.0, 4.0],
+    "urgent_slip_chance": 0.15,
     "jitter_minutes": 0,
     "board_id": None,
     "touch_existing_tasks": False,
@@ -107,12 +115,16 @@ COMMENTS = {
     "push": ["Ran out of time, doing this tomorrow.", "Pushing this a couple of days.", "Could not get to it today.",
              "Busy day, moving this.", "Will pick this up after the weekend."],
     "review": ["Done, just want to double check it.", "Finished, one more look before closing."],
+    "urgent": ["This just came up, doing it now.", "Dropping everything else for this one.",
+               "Has to be done today, on it.", "Last minute, starting right away."],
 }
 DESC = {
     "q": ["Small one, just get it done.", "Should take five minutes.", "Keep forgetting this one.",
           "Do it between classes.", "Quick task, do not overthink it.", "Needs doing today or tomorrow."],
     "b": ["Needs a proper sit-down session.", "Block an hour or two for this.", "Break it into parts if it drags.",
           "Want this done before the weekend.", "Been putting this off, time to start.", "Do this on a free evening."],
+    "u": ["Came up today, needs doing before tonight.", "Just found out about this, it is due today.",
+          "Urgent, push everything else back.", "Has to be sorted today."],
 }
 
 rng = random.Random(os.environ.get("AUTOPILOT_SEED"))
@@ -317,15 +329,20 @@ class Pool:
         self.projects = [p if isinstance(p, dict) else {"name": p} for p in personal.get("projects", [])]
         self.everyday = [mk_task(t) for t in generic.get("everyday", [])]
         self.specific = [mk_task(t) for t in personal.get("tasks", [])] + [mk_task(t) for t in extra]
-        self.templated = []
+        self.templated, self.urgent_mine = [], [mk_task(t) for t in personal.get("urgent", [])]
+        self.urgent_everyday = [mk_task(t) for t in generic.get("urgent", [])]
         for c in self.courses:
             short = c.get("short") or c["name"]
             for tpl in generic.get("course_templates", []):
                 self.templated.append({"t": tpl[0].format(c=short), "s": tpl[1], "a": c["name"], "d": ""})
+            for tpl in generic.get("urgent_course_templates", []):
+                self.urgent_mine.append({"t": tpl[0].format(c=short), "s": tpl[1], "a": c["name"], "d": ""})
         for p in self.projects:
             short = p.get("short") or p["name"]
             for tpl in generic.get("project_templates", []):
                 self.templated.append({"t": tpl[0].format(p=short), "s": tpl[1], "a": p["name"], "d": ""})
+            for tpl in generic.get("urgent_project_templates", []):
+                self.urgent_mine.append({"t": tpl[0].format(p=short), "s": tpl[1], "a": p["name"], "d": ""})
 
     def kind(self, area):
         n = norm(area)
@@ -337,6 +354,11 @@ class Pool:
 
     def fresh(self, bucket, used):
         return [t for t in bucket if t["t"] and norm(t["t"]) not in used]
+
+    def pick_urgent(self, used):
+        mine, everyday = self.fresh(self.urgent_mine, used), self.fresh(self.urgent_everyday, used)
+        bucket = mine if mine and (rng.random() < 0.6 or not everyday) else everyday
+        return rng.choice(bucket) if bucket else None
 
     def pick(self, n, used, everyday_ratio, quick_ratio):
         out, used = [], set(used)
@@ -436,6 +458,8 @@ class Ctx:
         self.pool = Pool(generic, personal, st.get("extra", []))
         self._meta = None
         self.epic_budget = 1 if cfg["allow_create_epics"] else 0
+        self.unsettable = set(st.get("unsettable", []))
+        self.epic_needs_component = st.get("epic_needs_component", False)
 
     # time
     def now(self):
@@ -482,7 +506,13 @@ class Ctx:
         trs = self.j.get(f"/rest/api/3/issue/{key}/transitions").get("transitions", [])
         for t in trs:
             if norm(t["to"]["name"]) == norm(target):
-                self.j.post(f"/rest/api/3/issue/{key}/transitions", {"transition": {"id": t["id"]}})
+                try:
+                    self.j.post(f"/rest/api/3/issue/{key}/transitions", {"transition": {"id": t["id"]}})
+                except JiraError as e:
+                    if e.code != 400:
+                        raise
+                    log(f"  {key}: Jira refused the move to {target} ({e}), skipped")
+                    return False
                 log(f"  {key} -> {target}")
                 return True
         log(f"  {key}: no direct transition to {target}, skipped")
@@ -497,17 +527,25 @@ class Ctx:
         fields = {k: v for k, v in fields.items() if v is not None}
         if not fields:
             return
+        fields = {k: v for k, v in fields.items() if k not in self.unsettable}
+        if not fields:
+            return
         try:
             self.j.put(f"/rest/api/3/issue/{key}", {"fields": fields})
         except JiraError as e:
-            if e.code != 400 or len(fields) == 1:
+            if e.code != 400:
                 log(f"  {key}: could not set {', '.join(fields)} ({e.code})")
                 return
             for k, v in fields.items():
                 try:
                     self.j.put(f"/rest/api/3/issue/{key}", {"fields": {k: v}})
-                except JiraError:
-                    log(f"  {key}: skipped field {k}")
+                except JiraError as e2:
+                    if "cannot be set" in str(e2) or "not on the appropriate screen" in str(e2):
+                        self.unsettable.add(k)
+                        self.st["unsettable"] = sorted(self.unsettable)
+                        log(f"  {k} is not on your issue screen, leaving it out from now on")
+                    else:
+                        log(f"  {key}: skipped field {k}")
 
     def comment(self, key, kind):
         text = rng.choice(COMMENTS[kind])
@@ -547,11 +585,11 @@ class Ctx:
         return p in {norm(x) for x in self.cfg["priorities"]["urgent"]}
 
     def epic_for(self, area):
+        """Best matching epic. Projects that use epics always get one, because some workflows
+        refuse to move a task without it: a close match, a new epic, else the closest one or 'General'."""
         kind = self.pool.kind(area)
         name = self.cfg["area_epics"].get(kind) if kind not in ("course", "project") else area
-        if not name:
-            return None
-        want = tokens(name)
+        want = tokens(name or area)
         best, score = None, 0.0
         for e in self.epics:
             have = tokens(e["summary"])
@@ -561,23 +599,50 @@ class Ctx:
                     best, score = e, s
         if best and score >= 0.5:
             return best["key"]
-        if self.epic_budget > 0:
+        if name and self.epic_budget > 0:
             self.epic_budget -= 1
-            r = self.j.post("/rest/api/3/issue", {"fields": {"project": {"key": self.key},
-                                                             "issuetype": {"name": "Epic"}, "summary": name}})
-            log(f"  created epic '{name}' {r.get('key', '')}")
-            if r.get("key"):
-                self.epics.append({"key": r["key"], "summary": name})
-                return r["key"]
-        return None
+            key = self.create_epic(name, area)
+            if key:
+                return key
+        if not self.epics:
+            return None  # project does not use epics
+        if best:
+            return best["key"]
+        general = next((e for e in self.epics if norm(e["summary"]) == "general"), None)
+        if general:
+            return general["key"]
+        return self.create_epic("General", area) if self.cfg["allow_create_epics"] else None
+
+    def create_epic(self, name, area):
+        fields = {"project": {"key": self.key}, "issuetype": {"name": "Epic"}, "summary": name}
+        if self.epic_needs_component:
+            fields["components"] = self.component_for(area)
+        try:
+            r = self.j.post("/rest/api/3/issue", {"fields": fields})
+        except JiraError as e:
+            if e.code != 400 or "omponent" not in str(e) or "components" in fields:
+                log(f"  could not create epic '{name}' ({e.code})")
+                return None
+            self.epic_needs_component = self.st["epic_needs_component"] = True  # some projects require one
+            fields["components"] = self.component_for(area)
+            try:
+                r = self.j.post("/rest/api/3/issue", {"fields": fields})
+            except JiraError as e2:
+                log(f"  could not create epic '{name}' ({e2.code})")
+                return None
+        log(f"  created epic '{name}' {r.get('key', '')}")
+        if r.get("key"):
+            self.epics.append({"key": r["key"], "summary": name})
+        return r.get("key")
 
     def component_for(self, area):
+        """Matching component, else the project's first one, since some workflows require one."""
         kind = self.pool.kind(area)
         have = {norm(c): c for c in self.components}
         for c in self.cfg["area_components"].get(kind, []):
             if norm(c) in have:
                 return [{"name": have[norm(c)]}]
-        return None
+        return [{"name": self.components[0]}] if self.components else None
 
     def info(self, issue):
         m = self.st.get("meta", {}).get(issue["key"])
@@ -603,7 +668,13 @@ class Ctx:
 
 # ---------------------------------------------------------------- phases
 
-def phase_drop(ctx, count=None):
+def pause(ctx, lo, hi):
+    """Wait a little between first-run actions so the Jira history does not all share one timestamp."""
+    if not ctx.j.dry:
+        time.sleep(rng.uniform(lo, hi))
+
+
+def phase_drop(ctx, count=None, pace=None):
     log("Drop: adding inbox items")
     recent = ctx.j.search(f"project = {jq(ctx.key)} AND created >= -21d", ["summary"], 300)
     used = {norm(i["fields"]["summary"]) for i in recent}
@@ -615,28 +686,38 @@ def phase_drop(ctx, count=None):
             log(f"  refilled {len(extra)} ideas from LLM")
     n = count or weighted([1, 2, 3], ctx.cfg["drop_count_weights"])
     picks = ctx.pool.pick(n, used, ctx.cfg["everyday_ratio"], ctx.cfg["quick_ratio"])
-    for t in picks:
+    keys = []
+    for n_done, t in enumerate(picks):
+        if pace and n_done:
+            pause(ctx, *pace)
         due = ctx.day(rng.randint(0, 2)) if t["s"] == "q" else ctx.day(rng.randint(2, 9))
         desc = t["d"] or rng.choice(DESC[t["s"]])
         if t["s"] == "b" and rng.random() < 0.4:
             d = parse_day(due)
             desc += f"\nDeadline: {d.strftime('%A')} {d.day} {d.strftime('%B')}"
-        fields = {"project": {"key": ctx.key}, "issuetype": {"name": ctx.issue_type},
-                  "summary": t["t"], "description": adf(desc)}
-        if ctx.cfg["label"]:
-            fields["labels"] = [ctx.cfg["label"]]
-        r = ctx.j.post("/rest/api/3/issue", {"fields": fields})
-        key = r.get("key")
-        log(f"  + {key or '(new)'} {t['t']}")
-        if not key:
-            continue
-        ctx.remember(key, {"a": t["a"], "s": t["s"], "d": due})
-        inbox = ctx.status.get("inbox")
-        if inbox:
-            cur = ctx.j.get(f"/rest/api/3/issue/{key}", fields="status")["fields"]["status"]["name"]
-            if norm(cur) != norm(inbox):
-                ctx.move(key, "inbox")
-    return len(picks)
+        key = create_task(ctx, t, due, desc)
+        if key:
+            keys.append(key)
+    return keys
+
+
+def create_task(ctx, t, due, desc):
+    fields = {"project": {"key": ctx.key}, "issuetype": {"name": ctx.issue_type},
+              "summary": t["t"], "description": adf(desc)}
+    if ctx.cfg["label"]:
+        fields["labels"] = [ctx.cfg["label"]]
+    r = ctx.j.post("/rest/api/3/issue", {"fields": fields})
+    key = r.get("key")
+    log(f"  + {key or '(new)'} {t['t']}")
+    if not key:
+        return None
+    ctx.remember(key, {"a": t["a"], "s": t["s"], "d": due})
+    inbox = ctx.status.get("inbox")
+    if inbox:
+        cur = ctx.j.get(f"/rest/api/3/issue/{key}", fields="status")["fields"]["status"]["name"]
+        if norm(cur) != norm(inbox):
+            ctx.move(key, "inbox")
+    return key
 
 
 def phase_morning(ctx):
@@ -704,38 +785,7 @@ def phase_night(ctx):
         if k not in seen:
             issue = ctx.j.get(f"/rest/api/3/issue/{k}", fields=",".join(ctx.search_fields()))
             todo.append(issue if issue.get("key") else {"key": k, "fields": {}})
-    for i in todo:
-        k, fl, inf = i["key"], i.get("fields") or {}, ctx.info(i)
-        due = fl.get("duedate") or inf.get("d") or \
-            (ctx.day(rng.randint(0, 2)) if inf["s"] == "q" else ctx.day(rng.randint(2, 9)))
-        urgent = due <= ctx.day(2)
-        quick = inf["s"] == "q"
-        fields = {
-            "duedate": due,
-            "assignee": {"accountId": ctx.me},
-            "components": None if fl.get("components") else ctx.component_for(inf["a"]),
-            "priority": ctx.priority(k, urgent),
-        }
-        if not fl.get("parent"):
-            e = ctx.epic_for(inf["a"])
-            fields["parent"] = {"key": e} if e else None
-        if f.get("story_points") and not fl.get(f["story_points"]):
-            fields[f["story_points"]] = 1 if quick else rng.choice([2, 3, 3, 5, 5, 8])
-        if f.get("deep_shallow"):
-            deep = (not quick) and rng.random() < 0.75
-            fields[f["deep_shallow"]] = ctx.option(k, "deep_shallow", ["deep"] if deep else ["shallow"])
-        if f.get("task_size"):
-            fields[f["task_size"]] = ctx.option(k, "task_size",
-                                                ["small", "quick", "<"] if quick else ["big", "large", ">"])
-        ctx.edit(k, fields)
-        log(f"  {k}: fields filled (due {due})")
-        title = norm(fl.get("summary"))
-        if any(w in title for w in PLAN_WORDS) and S.get("plan"):
-            ctx.move(k, "plan")
-        elif (not quick) and S.get("later") and rng.random() < 0.08:
-            ctx.move(k, "later")
-        elif S.get("process_today"):
-            ctx.move(k, "backlog")
+    process(ctx, todo)
 
     # 3. progress review
     scope = ctx.sjql("review", "in_progress", "plan", "backlog")
@@ -796,19 +846,62 @@ def phase_night(ctx):
     log(f"  progress changes: {changed}")
 
 
+def process(ctx, todo, allow_later=True, gap=None):
+    """Fill due date, assignee, epic, component, points and sizes, then file each task in the backlog."""
+    S, f = ctx.status, ctx.f
+    for n_done, i in enumerate(todo):
+        if gap and n_done:
+            pause(ctx, *gap)
+        k, fl, inf = i["key"], i.get("fields") or {}, ctx.info(i)
+        due = fl.get("duedate") or inf.get("d") or \
+            (ctx.day(rng.randint(0, 2)) if inf["s"] == "q" else ctx.day(rng.randint(2, 9)))
+        urgent = due <= ctx.day(2)
+        quick = inf["s"] == "q"
+        fields = {
+            "duedate": due,
+            "assignee": {"accountId": ctx.me},
+            "components": None if fl.get("components") else ctx.component_for(inf["a"]),
+            "priority": ctx.priority(k, urgent),
+        }
+        if not fl.get("parent"):
+            e = ctx.epic_for(inf["a"])
+            fields["parent"] = {"key": e} if e else None
+        if f.get("story_points") and not fl.get(f["story_points"]):
+            fields[f["story_points"]] = 1 if quick else rng.choice([2, 3, 3, 5, 5, 8])
+        if f.get("deep_shallow"):
+            deep = (not quick) and rng.random() < 0.75
+            fields[f["deep_shallow"]] = ctx.option(k, "deep_shallow", ["deep"] if deep else ["shallow"])
+        if f.get("task_size"):
+            fields[f["task_size"]] = ctx.option(k, "task_size",
+                                                ["small", "quick", "<"] if quick else ["big", "large", ">"])
+        ctx.edit(k, fields)
+        log(f"  {k}: fields filled (due {due})")
+        title = norm(fl.get("summary"))
+        if any(w in title for w in PLAN_WORDS) and S.get("plan"):
+            ctx.move(k, "plan")
+        elif allow_later and (not quick) and S.get("later") and rng.random() < 0.08:
+            ctx.move(k, "later")
+        elif S.get("process_today"):
+            ctx.move(k, "backlog")
+
+
+def find_board(ctx):
+    """The scrum board to use: board_id from config, else the first one that already has sprints."""
+    if ctx.cfg.get("board_id"):
+        return ctx.cfg["board_id"]
+    boards = ctx.j.get("/rest/agile/1.0/board", projectKeyOrId=ctx.key, type="scrum").get("values", [])
+    for bd in boards:
+        if ctx.j.get(f"/rest/agile/1.0/board/{bd['id']}/sprint", maxResults=1).get("values"):
+            return bd["id"]
+    return boards[0]["id"] if boards else None
+
+
 def phase_sprint(ctx):
     log("Sprint: planning and upkeep")
-    b = ctx.cfg.get("board_id")
+    b = find_board(ctx)
     if not b:
-        boards = ctx.j.get("/rest/agile/1.0/board", projectKeyOrId=ctx.key, type="scrum").get("values", [])
-        if not boards:
-            log("  no scrum board in this project, skipping sprints")
-            return
-        b = boards[0]["id"]
-        for bd in boards:
-            if ctx.j.get(f"/rest/agile/1.0/board/{bd['id']}/sprint", maxResults=1).get("values"):
-                b = bd["id"]
-                break
+        log("  no scrum board in this project, skipping sprints")
+        return
     active = ctx.j.get(f"/rest/agile/1.0/board/{b}/sprint", state="active").get("values", [])
     now = ctx.now()
     if active:
@@ -867,9 +960,10 @@ def start_sprint(ctx, board, carry=None):
             name = i["fields"]["parent"].get("fields", {}).get("summary")
             if name and name not in themes:
                 themes.append(name)
-    goal = (rng.choice(["Get through {0} and keep {1} moving", "Focus on {0}, then {1}", "Clear {0} and push {1}"])
-            .format(themes[0], themes[1]) if len(themes) >= 2 else
-            f"Make solid progress on {themes[0]}" if themes else "Clear the most urgent work this week")
+    goal = sp.get("goal") or (  # a sprint you planned yourself keeps your goal
+        rng.choice(["Get through {0} and keep {1} moving", "Focus on {0}, then {1}", "Clear {0} and push {1}"])
+        .format(themes[0], themes[1]) if len(themes) >= 2 else
+        f"Make solid progress on {themes[0]}" if themes else "Clear the most urgent work this week")
     start = ctx.now()
     end = (start + timedelta(days=ctx.cfg["sprint_length_days"])).replace(hour=18, minute=0, second=0, microsecond=0)
     ctx.j.post(f"/rest/agile/1.0/sprint/{sp['id']}", {
@@ -899,6 +993,127 @@ def keep_sprint(ctx, s):
     log(f"  sprint '{s['name']}' mid-way, {len(inside)} issues")
 
 
+def phase_kickoff(ctx):
+    """First run only: jot down a few tasks, sort them, plan a sprint and start on one,
+    the way someone sets up a fresh board, instead of waiting two nights for a sprint."""
+    log("Kickoff: first run, setting up the board")
+    ctx.st["kickoff_done"] = True  # set first so a failure halfway never repeats the drop
+    if ctx.cfg["allow_create_epics"]:
+        ctx.epic_budget = 3
+    keys = phase_drop(ctx, rng.randint(*ctx.cfg["kickoff_tasks"]), pace=(15, 60))
+    if keys:
+        pause(ctx, 45, 120)
+        settle(ctx, keys)
+
+
+def settle(ctx, keys):
+    """Second half of the kickoff: sort the new tasks, start a sprint, start one task."""
+    S = ctx.status
+    log("  sorting the new tasks")
+    todo = []
+    for k in keys:
+        if not leave_inbox(ctx, k):
+            continue
+        todo.append(ctx.j.get(f"/rest/api/3/issue/{k}", fields=",".join(ctx.search_fields())))
+    process(ctx, todo, allow_later=False, gap=(5, 20))
+    quick = [i["key"] for i in todo if ctx.info(i)["s"] == "q"]
+    if len(todo) >= 4 and quick and rng.random() < 0.6:
+        pause(ctx, 30, 90)
+        k = rng.choice(quick)
+        if ctx.finish(k):  # a quick one gets ticked off straight away
+            ctx.comment(k, "done")
+    pause(ctx, 45, 120)
+    phase_sprint(ctx)
+    pool = ctx.sjql("backlog", "plan")
+    if pool and S.get("in_progress"):
+        try:
+            cands = ctx.find(f"{pool} AND sprint in openSprints()")
+        except JiraError:  # project without sprints
+            cands = []
+        cands = cands or ctx.find(pool)
+        if cands:
+            pause(ctx, 30, 90)
+            k = cands[0]["key"]  # earliest due
+            if ctx.move(k, "in_progress"):
+                ctx.comment(k, "start")
+
+
+def leave_inbox(ctx, k):
+    """Give a new task its epic and move it out of the inbox. False if Jira refuses."""
+    inbox = ctx.status.get("inbox")
+    if not inbox:
+        return True
+    cur = ctx.j.get(f"/rest/api/3/issue/{k}", fields="status")["fields"]["status"]["name"]
+    if norm(cur) != norm(inbox):
+        return True  # already sorted
+    epic = ctx.epic_for(ctx.st.get("meta", {}).get(k, {}).get("a", "self"))
+    if epic:  # some workflows refuse to leave the inbox without an epic
+        ctx.edit(k, {"parent": {"key": epic}})
+    return ctx.move(k, "process_today") or ctx.move(k, "backlog")
+
+
+def plan_urgent(ctx):
+    """Rolled once a day: some days get one task that suddenly has to be done today."""
+    if (ctx.st.get("urgent") or {}).get("stage") in ("working", "review"):
+        return  # yesterday's is still in flight
+    lo, hi = ctx.cfg["active_hours"]
+    at = None
+    if rng.random() < ctx.cfg["urgent_day_chance"]:
+        at = rand_time([f"{lo:02d}:30", f"{max(lo, hi - 3):02d}:00"])
+    ctx.st["urgent"] = {"at": at, "stage": "planned" if at else None}
+
+
+def phase_urgent(ctx):
+    """Something comes up: add it, pull it into the running sprint and start on it straight away."""
+    log("Urgent: something came up")
+    u = ctx.st.setdefault("urgent", {})
+    u["stage"] = None  # one attempt per day, even if Jira refuses part of it
+    recent = ctx.j.search(f"project = {jq(ctx.key)} AND created >= -21d", ["summary"], 300)
+    t = ctx.pool.pick_urgent({norm(i["fields"]["summary"]) for i in recent})
+    if not t:
+        log("  no urgent ideas left")
+        return
+    key = create_task(ctx, t, ctx.day(), rng.choice(DESC["u"]))
+    if not key or not leave_inbox(ctx, key):
+        return
+    pause(ctx, 20, 60)
+    process(ctx, [ctx.j.get(f"/rest/api/3/issue/{key}", fields=",".join(ctx.search_fields()))], allow_later=False)
+    b = find_board(ctx)
+    active = ctx.j.get(f"/rest/agile/1.0/board/{b}/sprint", state="active").get("values", []) if b else []
+    if active:
+        ctx.j.post(f"/rest/agile/1.0/sprint/{active[0]['id']}/issue", {"issues": [key]})
+        log(f"  added {key} to '{active[0]['name']}'")
+    pause(ctx, 20, 60)
+    if ctx.move(key, "in_progress"):
+        ctx.comment(key, "urgent")
+        u.update(stage="working", key=key,
+                 next=ctx.now().timestamp() + rng.uniform(*ctx.cfg["urgent_work_hours"]) * 3600)
+
+
+def phase_urgent_followup(ctx):
+    """A few hours later: send the urgent task for review and close it, or now and then let it slip a day."""
+    u, S = ctx.st["urgent"], ctx.status
+    k = u["key"]
+    log(f"Urgent: following up on {k}")
+    cur = norm(ctx.j.get(f"/rest/api/3/issue/{k}", fields="status")["fields"]["status"]["name"])
+    if S.get("done") and cur == norm(S["done"]):
+        u["stage"] = "closed"
+        return
+    if u["stage"] == "working":
+        if rng.random() < ctx.cfg["urgent_slip_chance"]:
+            ctx.edit(k, {"duedate": ctx.day(1)})
+            ctx.comment(k, "push")
+            u["stage"] = "closed"  # the normal routines finish it from here
+            return
+        if S.get("review") and ctx.move(k, "review"):
+            ctx.comment(k, "review")
+            u.update(stage="review", next=ctx.now().timestamp() + rng.uniform(0.3, 1.5) * 3600)
+            return
+    if ctx.finish(k):
+        ctx.comment(k, "done")
+    u["stage"] = "closed"
+
+
 # ---------------------------------------------------------------- scheduler
 
 def rand_time(window):
@@ -914,10 +1129,15 @@ def tick(ctx):
     if st.get("day") != today:
         st.update(day=today, morning_at=rand_time(cfg["morning_window"]),
                   night_at=rand_time(cfg["night_window"]), morning_done=False, night_done=False)
+        plan_urgent(ctx)
         log(f"New day {today}: morning at {st['morning_at']}, night at {st['night_at']}")
     minutes = now.hour * 60 + now.minute
     ts = now.timestamp()
     start_h, end_h = cfg["active_hours"]
+    if not st.get("kickoff_done") and not st.get("last_sprint_day") and start_h <= now.hour < end_h:
+        phase_kickoff(ctx)
+        st["next_drop_at"] = ts + rng.uniform(*cfg["drop_gap_hours"]) * 3600
+        return
     morning_due = not st["morning_done"] and minutes >= hhmm(st["morning_at"])
     if morning_due and now.hour >= 14:  # runner was offline all morning, skip it today
         st["morning_done"], morning_due = True, False
@@ -929,7 +1149,12 @@ def tick(ctx):
         else:
             drop_due = ts >= nxt
     night_due = not st["night_done"] and minutes >= hhmm(st["night_at"])
-    did = morning_due or drop_due or night_due
+    u = st.get("urgent") or {}
+    urgent_due = u.get("stage") == "planned" and minutes >= hhmm(u["at"])
+    if urgent_due and now.hour >= end_h:  # runner was offline, skip it today
+        u["stage"], urgent_due = None, False
+    followup_due = u.get("stage") in ("working", "review") and ts >= u.get("next", 0)
+    did = morning_due or drop_due or night_due or urgent_due or followup_due
 
     jitter = float(cfg.get("jitter_minutes") or 0)
     if did and jitter > 0:
@@ -943,6 +1168,10 @@ def tick(ctx):
     if drop_due:
         phase_drop(ctx)
         st["next_drop_at"] = ts + rng.uniform(*cfg["drop_gap_hours"]) * 3600
+    if urgent_due:
+        phase_urgent(ctx)
+    elif followup_due:
+        phase_urgent_followup(ctx)
     if night_due:
         phase_night(ctx)
         last = parse_day(st.get("last_sprint_day"))
@@ -990,7 +1219,7 @@ def cmd_audit(ctx):
 def main():
     ap = argparse.ArgumentParser(description="Keep a Jira project active on a human-looking schedule.")
     ap.add_argument("command", nargs="?", default="tick",
-                    choices=["tick", "check", "audit", "drop", "morning", "night", "sprint", "refill"])
+                    choices=["tick", "check", "audit", "kickoff", "urgent", "drop", "morning", "night", "sprint", "refill"])
     ap.add_argument("--dry-run", action="store_true", help="show actions without changing Jira")
     ap.add_argument("--count", type=int, help="items to add with 'drop'")
     args = ap.parse_args()
@@ -1025,6 +1254,10 @@ def main():
     try:
         if args.command == "tick":
             tick(ctx)
+        elif args.command == "kickoff":
+            phase_kickoff(ctx)
+        elif args.command == "urgent":
+            phase_urgent(ctx)
         elif args.command == "drop":
             phase_drop(ctx, args.count)
         elif args.command == "morning":

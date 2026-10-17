@@ -27,7 +27,8 @@ Schema:
   "profile": "<one line about me>",
   "courses": [{"name": "<full name>", "short": "<short name>"}],
   "projects": [{"name": "<full name>", "short": "<short name>"}],
-  "tasks": [["<title>", "q" or "b", "<area>"]]
+  "tasks": [["<title>", "q" or "b", "<area>"]],
+  "urgent": [["<title>", "q" or "b", "<area>"]]
 }
 Rules:
 - 70 tasks. "q" = quick (under 10 minutes), "b" = bigger. About 40% quick.
@@ -36,4 +37,6 @@ Rules:
 - About 60% about my courses and projects, 40% my hobbies and routine.
 - Titles 3 to 9 words, the way a student would type a to-do. Specific and varied, no duplicates.
 - Where my existing epics fit, use the same course or project names they use.
+- 12 urgent tasks: things that suddenly have to be done TODAY. A deadline tonight, a quiz moved to tomorrow,
+  a bug before a demo, a form closing at 5pm. Say why it is urgent in the title. Same areas as above.
 ```

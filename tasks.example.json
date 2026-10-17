@@ -20,5 +20,11 @@
     ["Send invoice to the bakery client", "q", "Freelance websites"],
     ["Fix the contact form on the bakery site", "b", "Freelance websites"],
     ["Book futsal court for Saturday", "q", "social"]
+  ],
+  "urgent": [
+    ["DB lab 6 due tonight, finish the joins", "b", "Database Systems"],
+    ["OS quiz moved to tomorrow, revise scheduling", "b", "Operating Systems"],
+    ["Bakery site contact form broke, fix before noon", "b", "Freelance websites"],
+    ["Submit FYP proposal form before 5pm", "q", "Final Year Project"]
   ]
 }

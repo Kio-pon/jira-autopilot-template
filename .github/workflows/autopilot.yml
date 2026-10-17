@@ -11,7 +11,7 @@ on:
       command:
         description: "What to run"
         type: choice
-        options: [tick, check, audit, drop, morning, night, sprint, refill]
+        options: [tick, check, audit, kickoff, urgent, drop, morning, night, sprint, refill]
         default: tick
       dry_run:
         description: "Dry run (show actions, change nothing)"
