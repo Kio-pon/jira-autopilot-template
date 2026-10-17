@@ -1,0 +1,21 @@
+Jira Autopilot
+Copyright (c) 2026 Kio-pon. All rights reserved.
+
+You may use this software only if Kio-pon gave you access to it directly.
+
+You may:
+- make a copy for yourself, keep it in a private repository, and run it
+  against your own Jira account;
+- change your own copy for your own use.
+
+You may not, without written permission from Kio-pon:
+- make your copy, or any part of this code, public;
+- share, publish, sell, or give this code or a modified version to anyone else;
+- use it for anyone's account but your own.
+
+This permission ends automatically if you break these terms. You must then
+delete your copy.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY ARISING FROM THE USE OF THIS SOFTWARE.

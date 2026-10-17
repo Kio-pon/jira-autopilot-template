@@ -19,6 +19,8 @@ It works on any Jira Cloud project. It auto-detects your statuses, fields and bo
 
 ## Setup (about 10 minutes)
 
+> **Keep your copy private. Don't share this repo or its code.** See `LICENSE`: personal use only.
+
 ### 1. Get a Jira API token
 1. Open https://id.atlassian.com/manage-profile/security/api-tokens
 2. **Create API token**, name it `autopilot`, copy it somewhere safe.
@@ -26,7 +28,7 @@ It works on any Jira Cloud project. It auto-detects your statuses, fields and bo
 
 ### 2. Put this folder on GitHub
 1. Make a free GitHub account if you don't have one.
-2. If you got a GitHub link: click **Use this template → Create a new repository**, name it `jira-autopilot`, set it to **Private**. Skip to step 3.
+2. If you got a GitHub link: click **Use this template → Create a new repository**, pick **your own account** as the owner, name it `jira-autopilot`, set it to **Private**. Skip to step 3.
 3. If you got a zip: New repository, name it `jira-autopilot`, set it to **Private**. Upload every file in the folder, including the hidden `.github` folder. Easiest: on the repo page click **uploading an existing file**, then drag the whole folder in.
 
 ### 3. Add your secrets and one variable
