@@ -1,0 +1,45 @@
+name: jira-autopilot
+
+on:
+  schedule:
+    # Every 30 minutes from 08:07 to 00:37 Pakistan time (03:07 to 19:37 UTC).
+    # The script decides what is actually due, so this only needs to run often.
+    # Other time zones: shift the hour range by your UTC offset.
+    - cron: "7,37 3-19 * * *"
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "What to run"
+        type: choice
+        options: [tick, check, audit, drop, morning, night, sprint, refill]
+        default: tick
+      dry_run:
+        description: "Dry run (show actions, change nothing)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: jira-autopilot
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run autopilot
+        env:
+          JIRA_SITE: ${{ secrets.JIRA_SITE }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_TOKEN: ${{ secrets.JIRA_TOKEN }}
+          # A variable, not a secret: GitHub masks secret values in logs, which would turn PER-98 into ***-98.
+          JIRA_PROJECT: ${{ vars.JIRA_PROJECT || secrets.JIRA_PROJECT }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL }}
+        run: |
+          CMD="${{ github.event.inputs.command || 'tick' }}"
+          FLAG=""
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then FLAG="--dry-run"; fi
+          python3 autopilot.py "$CMD" $FLAG

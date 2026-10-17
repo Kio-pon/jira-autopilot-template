@@ -1,0 +1,24 @@
+{
+  "profile": "3rd year CS student in Karachi, runs a small web dev side business, plays futsal",
+  "courses": [
+    {"name": "Database Systems", "short": "DB"},
+    {"name": "Operating Systems", "short": "OS"},
+    {"name": "Software Engineering", "short": "SE"}
+  ],
+  "projects": [
+    {"name": "Final Year Project", "short": "FYP"},
+    {"name": "Freelance websites", "short": "client site"}
+  ],
+  "tasks": [
+    ["Write SQL joins for lab 6", "b", "Database Systems"],
+    ["Draw ER diagram for the group project", "b", "Database Systems"],
+    ["Implement round robin scheduler in C", "b", "Operating Systems"],
+    ["Read about page replacement algorithms", "b", "Operating Systems"],
+    ["Write user stories for the SE project", "b", "Software Engineering"],
+    ["Shortlist FYP supervisors", "q", "Final Year Project"],
+    ["Write the FYP problem statement", "b", "Final Year Project"],
+    ["Send invoice to the bakery client", "q", "Freelance websites"],
+    ["Fix the contact form on the bakery site", "b", "Freelance websites"],
+    ["Book futsal court for Saturday", "q", "social"]
+  ]
+}

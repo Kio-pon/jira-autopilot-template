@@ -1,0 +1,133 @@
+# Jira Autopilot
+
+Keeps your Jira project active without you opening Jira. It follows a normal student rhythm:
+
+| When | What happens |
+|---|---|
+| Every 2 to 3 hours, random gaps, 9am to 10pm | 1 to 3 new tasks land in your inbox. Mix of quick and long, everyday life and your courses. |
+| Morning, random time 8:00 to 9:30 | Reviews deferred tasks, re-defers some, starts 1 to 3 tasks. |
+| Night, random time 10:00 to 11:30 | Triages the inbox, sets epic, component, due date, story points, assignee, priority. Moves work along and finishes some. |
+| Every 2 days, before the night run | Plans, starts and closes 1-week sprints. |
+
+It runs free on GitHub Actions, so your laptop can stay off. It uses **zero AI tokens** day to day. You use a chatbot once, at setup, if you want personal tasks.
+
+It works on any Jira Cloud project. It auto-detects your statuses, fields and boards. It fits the SEPM course template (07 Inbox, 08 Defer, 06 Process Today and so on) out of the box and adapts to a plain To Do / In Progress / Done project.
+
+---
+
+## Setup (about 10 minutes)
+
+### 1. Get a Jira API token
+1. Open https://id.atlassian.com/manage-profile/security/api-tokens
+2. **Create API token**, name it `autopilot`, copy it somewhere safe.
+3. Note your site (like `yourname.atlassian.net`) and your project key (the letters before issue numbers, like `PER` in `PER-12`).
+
+### 2. Put this folder on GitHub
+1. Make a free GitHub account if you don't have one.
+2. If you got a GitHub link: click **Use this template → Create a new repository**, name it `jira-autopilot`, set it to **Private**. Skip to step 3.
+3. If you got a zip: New repository, name it `jira-autopilot`, set it to **Private**. Upload every file in the folder, including the hidden `.github` folder. Easiest: on the repo page click **uploading an existing file**, then drag the whole folder in.
+
+### 3. Add your secrets and one variable
+Repo **Settings → Secrets and variables → Actions → New repository secret**. Add these three:
+
+| Name | Value |
+|---|---|
+| `JIRA_SITE` | `yourname.atlassian.net` |
+| `JIRA_EMAIL` | the email you log in to Jira with |
+| `JIRA_TOKEN` | the token from step 1 |
+
+Then switch to the **Variables** tab on the same page and click **New repository variable**:
+
+| Name | Value |
+|---|---|
+| `JIRA_PROJECT` | your project key, like `PER` |
+
+It's a variable, not a secret, because GitHub hides secret values in the run logs. As a secret, every task key would show as `***-98` instead of `PER-98`.
+
+### 4. Test it
+1. Repo **Actions** tab. If asked, click **I understand my workflows, go ahead and enable them**.
+2. Click **jira-autopilot → Run workflow**, choose `check`, run it.
+3. Open the run. You should see your name, project, and how each status mapped. "Ready." means you're set.
+4. Optional: run `drop` with **Dry run** ticked to preview tasks without changing anything.
+
+That's it. From now on it runs by itself every 30 minutes and does whatever is due.
+
+### 5. Optional: personal tasks (one chatbot message)
+Out of the box it uses a built-in list of about 140 everyday tasks. To add tasks about your own courses and projects:
+1. **Run workflow → audit**. Copy the output.
+2. Open `SETUP_PROMPT.md`, fill in "About me", paste the audit output, send it to any chatbot.
+3. Save its reply as `tasks.json` in the repo (**Add file → Create new file**, name it `tasks.json`, paste, commit).
+
+`tasks.example.json` shows the format.
+
+---
+
+## Settings (`config.json`)
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `utc_offset_hours` | `5` | Your time zone. Pakistan is 5. |
+| `active_hours` | `[9, 22]` | Hours when new tasks may appear. |
+| `morning_window`, `night_window` | `08:00-09:30`, `22:00-23:30` | Random time picked inside each window, daily. Keep both before midnight. |
+| `drop_gap_hours` | `[2, 3]` | Random gap between inbox drops. |
+| `everyday_ratio` | `0.55` | Share of everyday life tasks vs course and project tasks. |
+| `quick_ratio` | `0.4` | Share of quick (under 10 min) tasks. |
+| `sprint_every_days` | `2` | How often sprints get checked. |
+| `sprint_length_days` | `7` | Sprint length. |
+| `jitter_minutes` | `0` | Extra random wait (minutes) before acting, so actions don't land on :07 and :37. Each wait costs Actions minutes, so keep it 0 on a private repo. On a public repo or your own computer, 20 is a good value. |
+| `touch_existing_tasks` | `false` | `false`: only touches tasks it created. `true`: also triages, moves and closes your existing tasks. |
+| `label` | `""` | Put a label like `"auto"` here to tag every task it creates. |
+| `allow_create_epics` | `true` | May create one new epic per night when nothing fits. |
+
+If your statuses have unusual names and `check` shows "-" for one you have, add your name to the matching list under `statuses` in `config.json`, for example `"statuses": {"review": ["QA"]}`.
+
+If you're not in Pakistan, also shift the hours in `.github/workflows/autopilot.yml`. The comment there explains how.
+
+---
+
+## Optional: AI refills
+When your personal task list runs low, the tool can ask an AI for 25 fresh ideas. One small request every week or two. Add three more secrets, picking any one provider:
+
+| Provider | `LLM_BASE_URL` | `LLM_MODEL` |
+|---|---|---|
+| Gemini (free key at aistudio.google.com) | `https://generativelanguage.googleapis.com/v1beta/openai/` | `gemini-2.5-flash` |
+| DeepSeek | `https://api.deepseek.com` | `deepseek-chat` |
+| OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` |
+| Groq (free key) | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` |
+
+Plus `LLM_API_KEY` with your key. Without these, it just reuses the built-in and personal lists, never repeating a title within 3 weeks.
+
+---
+
+## Run it on your own computer instead
+1. Install Python 3.9 or newer.
+2. Copy `.env.example` to `.env` and fill it in.
+3. `python autopilot.py check`
+4. Schedule `python autopilot.py tick` every 30 minutes: Task Scheduler on Windows, `crontab -e` on Mac or Linux (`*/30 * * * * cd /path/to/jira-autopilot && python3 autopilot.py tick`).
+
+The computer has to be on for it to run. GitHub Actions avoids that.
+
+## Commands
+```
+python autopilot.py check      verify login and show the mapping
+python autopilot.py audit      short summary for the setup prompt
+python autopilot.py tick       run whatever is due (what the schedule calls)
+python autopilot.py drop       add inbox items now  (--count 2 for a fixed number)
+python autopilot.py morning    run the morning routine now
+python autopilot.py night      run the night routine now
+python autopilot.py sprint     run sprint planning now
+python autopilot.py refill     fetch AI task ideas now (needs the LLM settings)
+```
+Add `--dry-run` to any of them to preview.
+
+## Pause or stop
+**Actions → jira-autopilot → ⋯ → Disable workflow.** Enable it again the same way.
+
+## FAQ
+**Where does it remember things?** In a small private property on your own Jira user account, so it works from anywhere. It falls back to a local `state.json` if that's blocked.
+
+**GitHub Actions minutes?** About 34 short runs a day, roughly 1,000 minutes a month. Private repos get 2,000 free minutes.
+
+**It says "no direct transition".** Your workflow doesn't allow that jump. It skips and carries on. Allow the transition in Jira, or ignore it.
+
+**Something went wrong.** Open the latest run in the Actions tab. The log says exactly what it tried.
