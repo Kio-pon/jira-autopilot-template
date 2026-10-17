@@ -196,7 +196,7 @@ def test_setup():
     with tempfile.TemporaryDirectory() as tmp:
         tasks_file, result = os.path.join(tmp, "tasks.json"), os.path.join(tmp, "result.md")
         keep = fresh_env(GEMINI_API_KEY="fake", TASKS_FILE=tasks_file, INBOX_RESULT=result,
-                         ISSUE_BODY="3rd year CS at Habib. Courses: Database Systems (DB), Operating Systems (OS). "
+                         ISSUE_BODY="3rd year CS student. Courses: Database Systems (DB), Operating Systems (OS). "
                                     "Project: Robocat. I play futsal on weekends.")
         try:
             ap = load_autopilot()
