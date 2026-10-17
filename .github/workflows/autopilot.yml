@@ -35,9 +35,7 @@ jobs:
           JIRA_TOKEN: ${{ secrets.JIRA_TOKEN }}
           # A variable, not a secret: GitHub masks secret values in logs, which would turn PER-98 into ***-98.
           JIRA_PROJECT: ${{ vars.JIRA_PROJECT || secrets.JIRA_PROJECT }}
-          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
-          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-          LLM_MODEL: ${{ secrets.LLM_MODEL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           CMD="${{ github.event.inputs.command || 'tick' }}"
           FLAG=""

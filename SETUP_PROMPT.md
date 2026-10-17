@@ -1,9 +1,9 @@
 # One-time personalisation prompt
 
-Works in any chatbot: ChatGPT, Gemini, Claude, DeepSeek, Copilot. Free plans are fine. It takes one message.
+Paste it into Gemini at https://gemini.google.com (free, same Google account as your API key). It takes one message.
 
 1. Run `python autopilot.py audit` (or the **audit** option in the GitHub Actions "Run workflow" menu) and copy its output.
-2. Fill in the "About me" part below, paste the audit output where shown, and send the whole thing.
+2. Fill in the "About me" part below, paste the audit output where shown, and send the whole thing to Gemini.
 3. Save the JSON it returns as `tasks.json` next to `autopilot.py`.
 
 Skip this step entirely if you like. The tool then uses only the built-in everyday task list.

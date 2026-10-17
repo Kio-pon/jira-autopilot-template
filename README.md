@@ -11,7 +11,7 @@ Keeps your Jira project active without you opening Jira. It follows a normal stu
 | Whenever you open an issue | Your real tasks land in the inbox with your times and due dates. Mixed in with the rest, never closed for you. |
 | About 1 day in 4, at a random time | Something urgent comes up: one task due today, top priority, pulled into the sprint and started. A few hours later it goes to review and gets closed. Now and then it slips a day. |
 
-It runs free on GitHub Actions, so your laptop can stay off. It uses **zero AI tokens** day to day. You use a chatbot once, at setup, if you want personal tasks.
+It runs free on GitHub Actions, so your laptop can stay off. It uses **zero AI tokens** day to day. You use Gemini once, at setup, if you want personal tasks.
 
 It works on any Jira Cloud project. It auto-detects your statuses, fields and boards. It fits the SEPM course template (07 Inbox, 08 Defer, 06 Process Today and so on) out of the box and adapts to a plain To Do / In Progress / Done project.
 
@@ -56,10 +56,10 @@ That's it. From now on it runs by itself every 30 minutes and does whatever is d
 
 **First run.** The first scheduled run between 9am and 10pm sets up your board: it adds 4 to 6 tasks, sorts them, starts a 1-week sprint and starts one task, spread over about 10 minutes. It happens once. Don't want to wait for the schedule? **Run workflow → kickoff** does it now.
 
-### 5. Optional: personal tasks (one chatbot message)
+### 5. Optional: personal tasks (one Gemini message)
 Out of the box it uses a built-in list of about 140 everyday tasks. To add tasks about your own courses and projects:
 1. **Run workflow → audit**. Copy the output.
-2. Open `SETUP_PROMPT.md`, fill in "About me", paste the audit output, send it to any chatbot.
+2. Open `SETUP_PROMPT.md`, fill in "About me", paste the audit output, send it to Gemini at https://gemini.google.com.
 3. Save its reply as `tasks.json` in the repo (**Add file → Create new file**, name it `tasks.json`, paste, commit).
 
 `tasks.example.json` shows the format. The reply also has a short `urgent` list, used on urgent days. Without one, it uses built-in urgent tasks.
@@ -82,7 +82,7 @@ done PER-42
 
 Within a minute it adds them to your inbox, replies with the new keys, and closes the issue. The night run sorts them with everything else.
 **Your own tasks are never closed, deferred or re-dated for you.** Only a `done` line or you in Jira closes them.
-If you set up an AI key (see AI refills), you can also write free text, like "finish the DB lab by friday, about 2 hours". Without a key, plain text still works for simple lines like `Finish DB lab by fri, 2h`.
+If you added a Gemini key (see Optional: Gemini), you can also write free text, like "finish the DB lab by friday, about 2 hours". Without a key, plain text still works for simple lines like `Finish DB lab by fri, 2h`.
 Only issues you open count. Anyone else's are ignored.
 
 ---
@@ -107,6 +107,7 @@ Only issues you open count. Anyone else's are ignored.
 | `touch_existing_tasks` | `false` | `false`: only touches tasks it created. `true`: also triages, moves and closes your existing tasks. |
 | `label` | `""` | Put a label like `"auto"` here to tag every task it creates. |
 | `allow_create_epics` | `true` | May create one new epic per night when nothing fits. |
+| `gemini_model` | `gemini-3.8-flash` | Only change this if Google retires the model. |
 
 If your statuses have unusual names and `check` shows "-" for one you have, add your name to the matching list under `statuses` in `config.json`, for example `"statuses": {"review": ["QA"]}`.
 
@@ -114,17 +115,15 @@ If you're not in Pakistan, also shift the hours in `.github/workflows/autopilot.
 
 ---
 
-## Optional: AI refills
-When your personal task list runs low, the tool can ask an AI for 25 fresh ideas. One small request every week or two. Add three more secrets, picking any one provider:
+## Optional: Gemini (free)
+Add one more secret, `GEMINI_API_KEY`, with a free key from https://aistudio.google.com/apikey (sign in with Google, **Create API key**). Nothing else to set.
 
-| Provider | `LLM_BASE_URL` | `LLM_MODEL` |
-|---|---|---|
-| Gemini (free key at aistudio.google.com) | `https://generativelanguage.googleapis.com/v1beta/openai/` | `gemini-2.5-flash` |
-| DeepSeek | `https://api.deepseek.com` | `deepseek-chat` |
-| OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` |
-| Groq (free key) | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` |
+It turns on two things:
+- **Fresh ideas.** When your personal task list runs low, it asks Gemini for 25 new tasks. About one request every week or two.
+- **Free-text issues.** Write tasks however you like, for example "finish the DB lab by friday, about 2 hours". Gemini turns them into proper tasks with times and dates.
 
-Plus `LLM_API_KEY` with your key. Without these, it just reuses the built-in and personal lists, never repeating a title within 3 weeks.
+It uses `gemini-3.8-flash`, Google's default free model. That's a handful of requests a month, far under the free limits. Without a key, everything else works the same: it reuses the built-in and personal lists, never repeating a title within 3 weeks, and issues use the `title | time | due` format.
+Note: on Google's free tier, what you send may be used to improve Google's products. Don't put anything private in your tasks.
 
 ---
 
@@ -148,7 +147,7 @@ python autopilot.py drop       add inbox items now  (--count 2 for a fixed numbe
 python autopilot.py morning    run the morning routine now
 python autopilot.py night      run the night routine now
 python autopilot.py sprint     run sprint planning now
-python autopilot.py refill     fetch AI task ideas now (needs the LLM settings)
+python autopilot.py refill     fetch fresh task ideas from Gemini now (needs GEMINI_API_KEY)
 ```
 Add `--dry-run` to any of them to preview.
 

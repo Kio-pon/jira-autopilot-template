@@ -18,7 +18,7 @@ Commands:
   python autopilot.py urgent    something comes up: add an urgent task and start it now
   python autopilot.py inbox     add your own tasks from ISSUE_TITLE / ISSUE_BODY (the issue workflow)
   python autopilot.py drop | morning | night | sprint    force one phase now
-  python autopilot.py refill    ask your LLM (optional) for fresh task ideas
+  python autopilot.py refill    ask Gemini (optional, GEMINI_API_KEY) for fresh task ideas
 Add --dry-run to any command to see what would happen without changing Jira.
 """
 import argparse
@@ -56,6 +56,7 @@ DEFAULTS = {
     "sprint_size": [6, 12],
     "sprint_name_prefix": "",
     "kickoff_tasks": [4, 6],
+    "gemini_model": "gemini-3.8-flash",
     "urgent_day_chance": 0.25,
     "urgent_work_hours": [1.0, 4.0],
     "urgent_slip_chance": 0.15,
@@ -385,15 +386,21 @@ class Pool:
         return out
 
 
-def llm_array(prompt, temperature):
-    """One chat call to any OpenAI-compatible API. Returns the JSON array in the reply, or None."""
-    base, key, model = (os.environ.get("LLM_BASE_URL"), os.environ.get("LLM_API_KEY"),
-                        os.environ.get("LLM_MODEL"))
-    if not (base and key and model):
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+
+
+def gemini_key():
+    return os.environ.get("GEMINI_API_KEY", "").strip()
+
+
+def llm_array(prompt, model):
+    """One Gemini call. Returns the JSON array in the reply, or None. Temperature stays at the
+    default, because Google warns that lowering it makes Gemini 3 models loop or do worse."""
+    key = gemini_key()
+    if not key:
         return None
-    body = json.dumps({"model": model, "messages": [{"role": "user", "content": prompt}],
-                       "temperature": temperature}).encode()
-    request = urllib.request.Request(base.rstrip("/") + "/chat/completions", data=body, method="POST",
+    body = json.dumps({"model": model, "messages": [{"role": "user", "content": prompt}]}).encode()
+    request = urllib.request.Request(GEMINI_URL, data=body, method="POST",
                                      headers={"Authorization": f"Bearer {key}",
                                               "Content-Type": "application/json"})
     try:
@@ -401,12 +408,15 @@ def llm_array(prompt, temperature):
             content = json.loads(resp.read())["choices"][0]["message"]["content"]
         m = re.search(r"\[[\s\S]*\]", content)
         return json.loads(m.group(0)) if m else None
-    except Exception as e:  # never let an optional LLM break the run
-        log(f"  LLM call failed: {e}")
+    except urllib.error.HTTPError as e:  # never let the optional AI break the run
+        log(f"  Gemini call failed: {e.code} {e.read().decode(errors='replace')[:200]}")
+        return None
+    except Exception as e:
+        log(f"  Gemini call failed: {e}")
         return None
 
 
-def llm_tasks(personal, recent_titles, n=25):
+def llm_tasks(personal, recent_titles, model, n=25):
     courses = ", ".join((c if isinstance(c, str) else c.get("name", "")) for c in personal.get("courses", []))
     projects = ", ".join((p if isinstance(p, str) else p.get("name", "")) for p in personal.get("projects", []))
     prompt = (
@@ -418,7 +428,7 @@ def llm_tasks(personal, recent_titles, n=25):
         'Return ONLY a JSON array of [title, "q" or "b", area] where area is a course name, a project name, '
         "or one of chores, errands, tech, social, family, health, self, admin, finance. Titles 3 to 9 words."
     )
-    items = llm_array(prompt, 0.9) or []
+    items = llm_array(prompt, model) or []
     return [mk_task(t) for t in items if t and (isinstance(t, (list, dict)))]
 
 
@@ -691,12 +701,12 @@ def phase_drop(ctx, count=None, pace=None):
     log("Drop: adding inbox items")
     recent = ctx.j.search(f"project = {jq(ctx.key)} AND created >= -21d", ["summary"], 300)
     used = {norm(i["fields"]["summary"]) for i in recent}
-    if len(ctx.pool.fresh(ctx.pool.specific, used)) < 10 and os.environ.get("LLM_API_KEY"):
-        extra = llm_tasks(ctx.pool.personal, [i["fields"]["summary"] for i in recent])
+    if len(ctx.pool.fresh(ctx.pool.specific, used)) < 10 and gemini_key():
+        extra = llm_tasks(ctx.pool.personal, [i["fields"]["summary"] for i in recent], ctx.cfg["gemini_model"])
         if extra:
             ctx.st["extra"] = (ctx.st.get("extra", []) + [[t["t"], t["s"], t["a"]] for t in extra])[-80:]
             ctx.pool.specific += extra
-            log(f"  refilled {len(extra)} ideas from LLM")
+            log(f"  refilled {len(extra)} ideas from Gemini")
     n = count or weighted([1, 2, 3], ctx.cfg["drop_count_weights"])
     picks = ctx.pool.pick(n, used, ctx.cfg["everyday_ratio"], ctx.cfg["quick_ratio"])
     keys = []
@@ -1221,7 +1231,7 @@ def llm_inbox(ctx, text):
     prompt = (f"Today is {ctx.today().strftime('%A %d %B %Y')}. Turn this to-do text into tasks.\n"
               "Return ONLY a JSON array of [title, minutes or null, due date YYYY-MM-DD or null]. "
               "Titles 3 to 9 words, the way a student types a to-do. Keep every task, add none.\n\n" + text)
-    items = llm_array(prompt, 0.2) or []
+    items = llm_array(prompt, ctx.cfg["gemini_model"]) or []
     out = []
     for it in items:
         if isinstance(it, list) and it and isinstance(it[0], str) and it[0].strip():
@@ -1270,6 +1280,7 @@ def phase_inbox(ctx, title, body):
     for title_, minutes, due, area in items:
         if not title_:
             continue
+        title_ = title_[0].upper() + title_[1:]
         size = "q" if minutes is not None and minutes <= 15 else "b"
         due = due or (ctx.day(rng.randint(0, 2)) if size == "q" else ctx.day(rng.randint(2, 7)))
         if minutes:
@@ -1282,6 +1293,8 @@ def phase_inbox(ctx, title, body):
         t = {"t": title_[:200], "s": size, "a": area or ctx.guess_area(title_), "d": ""}
         key = create_task(ctx, t, due, desc)
         if not key:
+            if ctx.j.dry:
+                report.append(f"Would add {title_}, due {due}" + (f", {desc[6:-1]}" if minutes else ""))
             continue
         ctx.st["meta"][key].update(real=True, m=minutes, p=points_for(minutes) if minutes else None)
         when = parse_day(due)
@@ -1453,9 +1466,9 @@ def main():
             phase_sprint(ctx)
         elif args.command == "refill":
             recent = jira.search(f"project = {jq(ctx.key)} AND created >= -21d", ["summary"], 300)
-            extra = llm_tasks(personal, [i["fields"]["summary"] for i in recent])
+            extra = llm_tasks(personal, [i["fields"]["summary"] for i in recent], cfg["gemini_model"])
             st["extra"] = (st.get("extra", []) + [[t["t"], t["s"], t["a"]] for t in extra])[-80:]
-            log(f"Added {len(extra)} ideas." if extra else "No ideas added. Check LLM_BASE_URL, LLM_API_KEY, LLM_MODEL.")
+            log(f"Added {len(extra)} ideas." if extra else "No ideas added. Check GEMINI_API_KEY.")
     except JiraError as e:
         log(f"Jira error: {e}")
     finally:
