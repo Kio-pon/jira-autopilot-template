@@ -25,7 +25,7 @@ jobs:
         id: get
         env:
           TEMPLATE_KEY: ${{ secrets.TEMPLATE_KEY }}
-          TEMPLATE_REPO: ${{ vars.TEMPLATE_REPO || 'FaltoCourse/jira-autopilot-template' }}
+          TEMPLATE_REPO: ${{ vars.TEMPLATE_REPO || 'Kio-pon/jira-autopilot-template' }}
         run: |
           if [ -z "$TEMPLATE_KEY" ]; then
             echo "No TEMPLATE_KEY secret, so updates are off. See README, Getting updates."
