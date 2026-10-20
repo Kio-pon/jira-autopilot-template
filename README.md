@@ -1,24 +1,6 @@
 # Jira Autopilot
 
-Keeps your Jira project active without you opening Jira, on the rhythm of a real student's week:
-
-| When | What happens |
-|---|---|
-| Every 3 to 4.5 hours, 9am to 10pm | 1 or 2 new tasks land in your inbox. A mix of quick and longer ones, everyday life and your courses. About 3 in 10 have no due date, like real to-dos. |
-| Morning, 8:00 to 9:30 (later at weekends) | Reviews deferred tasks and starts the next thing, never more than 2 tasks in progress at once. |
-| Night, starting 21:45 to 22:50, over three runs about half an hour apart | Sorts the inbox (epic, component, due date, points, priority), works through what's in progress, then sprint upkeep. Bigger tasks take several evenings and log their time. Small chores just get done. |
-| Every week, on the sprint's end date | Closes the sprint and plans the next one from how much actually got done last time, so sprints end mostly done, not perfectly. |
-| About 1 day in 4, at a random time | Something urgent comes up: a task due today goes into the sprint and gets started, then reviewed and closed a few hours later. Now and then it slips a day. |
-| Weekends | Fewer and lighter tasks, a later start, fewer hours of work. |
-| About 1 day in 12 | Nothing happens at all. People have those days. |
-| Days you use Jira yourself | It notices your own changes and keeps out of your way. |
-| Whenever you open an issue | Your real tasks land in the inbox with your times and due dates. They get planned, never closed for you. |
-
-Details that keep it believable: a few seconds between clicks and half a minute between tasks, comment phrases that don't repeat within two weeks, an occasional typo in a title that gets fixed later, small edits during the day (re-ranking, nudging a date), and a night that sometimes only gets halfway through the inbox.
-
-It runs free on GitHub Actions, so your laptop can stay off. It uses **zero AI tokens** day to day.
-
-It works on any Jira Cloud project. It detects your statuses, fields and boards by itself. It fits the SEPM course template (07 Inbox, 08 Defer, 06 Process Today and so on) out of the box, including its rules (an epic before a task leaves the inbox, a component before it enters the semester backlog). It also adapts to a plain To Do / In Progress / Done project.
+Keeps your Jira project active by itself. It runs free on GitHub Actions, so your laptop can stay off. It works on any Jira Cloud project and fits the SEPM course template out of the box.
 
 ---
 
@@ -164,7 +146,7 @@ Note: on Google's free tier, what you send may be used to improve Google's produ
 ---
 
 ## Tests
-`python3 tests/run_tests.py` runs everything without a Jira account: the issue parser, the alert and setup logic, then four 30-day simulations on a fake Jira that follows the SEPM template's rules. It checks that your own tasks are never touched, sprints end mostly but not perfectly done, big tasks take days, nothing happens in bursts, comments don't repeat, weekends are lighter, it backs off when you use Jira, and the backlog stays manageable. It takes about 10 seconds. `--long` runs eight 90-day semesters. The `tests` workflow runs it on every push.
+`python3 tests/run_tests.py` runs everything without a Jira account. `--long` runs a longer simulation. The `tests` workflow runs it on every push.
 
 ## Run it on your own computer instead
 1. Install Python 3.9 or newer.
